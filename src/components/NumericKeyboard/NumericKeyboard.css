@@ -1,0 +1,219 @@
+.numeric-keyboard-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.numeric-keyboard {
+  background: var(--bg-color);
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  padding: 20px;
+  width: 320px;
+  max-width: 90vw;
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(50px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.keyboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.keyboard-display {
+  background: var(--input-bg);
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 15px;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-color);
+  flex: 1;
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.keyboard-close {
+  background: #e74c3c;
+  border: none;
+  border-radius: 8px;
+  width: 45px;
+  height: 45px;
+  margin-left: 10px;
+  font-size: 24px;
+  font-weight: bold;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.keyboard-close:hover {
+  background: #c0392b;
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
+}
+
+.keyboard-close:active {
+  transform: scale(0.95);
+}
+
+.keyboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.keyboard-key {
+  background: #2c2c2c;
+  border: 2px solid #444;
+  border-radius: 8px;
+  padding: 20px;
+  font-size: 24px;
+  font-weight: 600;
+  color: #ffffff;
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.keyboard-key:hover {
+  background: #3c3c3c;
+  border-color: var(--primary-color);
+  transform: scale(1.05);
+}
+
+.keyboard-key:active {
+  transform: scale(0.95);
+  background: var(--primary-color);
+  color: white;
+}
+
+.keyboard-key.backspace {
+  background: #ff9800;
+  color: white;
+  border-color: #ff9800;
+}
+
+.keyboard-key.backspace:hover {
+  background: #f57c00;
+}
+
+.keyboard-key.decimal {
+  background: var(--info-color);
+  color: white;
+  border-color: var(--info-color);
+}
+
+.keyboard-key.decimal:hover {
+  background: #0056b3;
+}
+
+.keyboard-key.clear {
+  background: var(--danger-color);
+  color: white;
+  border-color: var(--danger-color);
+}
+
+.keyboard-key.clear:hover {
+  background: #c92a2a;
+}
+
+.keyboard-key.enter {
+  background: var(--success-color);
+  color: white;
+  border-color: var(--success-color);
+  grid-column: span 2;
+}
+
+.keyboard-key.enter:hover {
+  background: #2d8f3c;
+}
+
+.keyboard-hint {
+  text-align: center;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #999;
+  font-style: italic;
+}
+
+/* RTL Support */
+[dir="rtl"] .keyboard-display {
+  text-align: left;
+}
+
+/* Light Mode Adjustments */
+[data-theme="light"] .numeric-keyboard {
+  background: white;
+}
+
+[data-theme="light"] .keyboard-display {
+  background: #f5f5f5;
+  border-color: #ddd;
+  color: #333;
+}
+
+[data-theme="light"] .keyboard-key {
+  background: #ffffff;
+  border-color: #dee2e6;
+  color: #333;
+}
+
+[data-theme="light"] .keyboard-key:hover {
+  background: #e9ecef;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .numeric-keyboard {
+    width: 100%;
+    max-width: 350px;
+    padding: 15px;
+  }
+
+  .keyboard-key {
+    padding: 15px;
+    font-size: 20px;
+  }
+
+  .keyboard-display {
+    font-size: 20px;
+    padding: 10px 12px;
+  }
+}

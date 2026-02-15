@@ -1,0 +1,68 @@
+name: Publish Electron releases
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-windows:
+    name: Build & publish (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build renderer
+        run: npm run build
+      - name: Build Windows and publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x86 --x64 --publish always
+
+  build-linux:
+    name: Build & publish (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build renderer
+        run: npm run build
+      - name: Build Linux and publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --x64 --publish always
+
+  build-macos:
+    name: Build & publish (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build renderer
+        run: npm run build
+      - name: Build macOS and publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # For macOS signing/notarization you must add APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD secrets
+        run: npx electron-builder --mac --publish always
+
+# Notes:
+# - This workflow triggers on a tag like v1.2.3 (push annotated tag).
+# - electron-builder reads GH_TOKEN to publish to Releases.
+# - macOS builds that are signed/notarized require Apple credentials; Windows code signing requires a certificate and env vars.
+# - Consider using a separate job to create the release and then upload artifacts from each runner, or use GH_TOKEN published by electron-builder as above.

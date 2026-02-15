@@ -1,0 +1,101 @@
+.license-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  padding: 32px 32px 24px 32px;
+  border-radius: 12px;
+  box-shadow: 0 4px 32px rgba(0,0,0,0.18);
+  min-width: 340px;
+  z-index: 9999;
+  box-sizing: border-box;
+}
+.license-modal h2 {
+  text-align: center;
+  margin-top: 24px;
+  margin-bottom: 16px;
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #ff9800;
+}
+.license-modal input {
+  width: 100%;
+  padding: 0.7rem;
+  margin: 1rem 0;
+  border-radius: 6px;
+  border: 1px solid #ff9800;
+  font-size: 1.1rem;
+}
+.license-modal button {
+  background: #ff9800;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.7rem 2rem;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.license-modal button:disabled {
+  background: #888;
+  cursor: not-allowed;
+}
+.license-status {
+  margin-top: 1rem;
+  color: #ff9800;
+  font-weight: bold;
+}
+.close-btn {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  margin: 0;
+  padding: 4px 12px;
+  background: #e74c3c;
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  font-size: 1.2rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.2s;
+  line-height: 1;
+}
+.close-btn:hover {
+  background: #c0392b;
+}
+.license-key-input-group {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 1.2rem 0 1.2rem 0;
+}
+.license-key-rect {
+  min-width: 72px;
+  width: 6ch;
+  height: 48px;
+  border: 2px solid #ff9800;
+  border-radius: 8px;
+  font-size: 1.6rem;
+  font-family: monospace;
+  text-align: center;
+  margin-right: 8px;
+  background: #fff;
+  outline: none;
+  transition: border 0.2s;
+  letter-spacing: 2px;
+}
+.license-key-rect:last-child {
+  margin-right: 0;
+}
+.license-key-rect:focus {
+  border-color: #e67e22;
+}
+.license-key-dash {
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #888;
+  margin: 0 4px;
+  user-select: none;
+}

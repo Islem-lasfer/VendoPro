@@ -1,0 +1,4 @@
+npm install minimist --no-save
+node scripts/generate_cd_build.js --count 1 --output builds/cd --keysPerCd 50
+node scripts/apply_cd_to_project.js --cd builds/cd/cd_001
+npm run dist:win
