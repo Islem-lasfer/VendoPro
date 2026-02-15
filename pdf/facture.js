@@ -35,7 +35,7 @@ function generateFacture() {
   doc.text("[Adresse client complète]", 130, 58);
   doc.text("SIRET / ID : [..]", 130, 64);
 
-  /* ====== TABLEAU PRODUITS ====== */
+  /* ====== TABLEAU PRODUITS (style: grid, right-aligned currency) ====== */
   doc.autoTable({
     startY: 80,
     head: [[
@@ -45,31 +45,51 @@ function generateFacture() {
       "TOTAL (€)"
     ]],
     body: [
-      ["Produit A — référence XXX", "1", "900.00", "900.00"],
-      ["Service B — description", "2", "300.00", "600.00"]
+      ["Produit A — référence XXX", 1, "900.00", "900.00"],
+      ["Service B — description", 2, "300.00", "600.00"]
     ],
-    headStyles: {
-      fillColor: noir,
-      textColor: 255,
-      halign: "center"
-    },
-    bodyStyles: {
-      halign: "center"
-    },
+    theme: 'grid',
     styles: {
-      fontSize: 10
-    }
+      fontSize: 10,
+      cellPadding: 3,
+      lineColor: 220,
+      lineWidth: 0.1
+    },
+    headStyles: {
+      fillColor: [245,245,245],
+      textColor: 0,
+      halign: 'center',
+      fontStyle: 'bold'
+    },
+    columnStyles: {
+      0: { halign: 'left', cellWidth: 95 },
+      1: { halign: 'center', cellWidth: 25 },
+      2: { halign: 'right', cellWidth: 35 },
+      3: { halign: 'right', cellWidth: 35 }
+    },
+    alternateRowStyles: { fillColor: [250,250,250] }
   });
 
-  /* ====== TOTAUX ====== */
-  const finalY = doc.lastAutoTable.finalY + 10;
+  /* ====== TOTAUX (visually emphasised, right-aligned) ====== */
+  const finalY = doc.lastAutoTable.finalY + 8;
+
+  // boxed totals on the right
+  doc.setDrawColor(200);
+  doc.setLineWidth(0.5);
+  doc.rect(110, finalY - 6, 90, 34);
 
   doc.setFontSize(10);
-  doc.text("Montant hors taxes (HT) : 1 500,00 €", 140, finalY);
-  doc.text("TVA (20%) : 300,00 €", 140, finalY + 7);
+  doc.setFont(undefined, 'normal');
+  doc.text('Montant hors taxes (HT)', 120, finalY + 2);
+  doc.text('1 500,00 €', 195, finalY + 2, { align: 'right' });
 
-  doc.setFontSize(14);
-  doc.text("Montant total (TTC) : 1 800,00 €", 140, finalY + 18);
+  doc.text('TVA (20%)', 120, finalY + 10);
+  doc.text('300,00 €', 195, finalY + 10, { align: 'right' });
+
+  doc.setFontSize(13);
+  doc.setFont(undefined, 'bold');
+  doc.text('Montant total (TTC)', 120, finalY + 24);
+  doc.text('1 800,00 €', 195, finalY + 24, { align: 'right' });
 
   /* ====== CONDITIONS DE PAIEMENT ====== */
   doc.setFontSize(10);

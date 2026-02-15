@@ -420,77 +420,96 @@ async function generatePayslip(employee, settings, month, year, language = 'en',
     addText(`${t.startDate}: ${employee.startDate}`, 115, yPos + 37);
   }
 
-  /* ====== EARNINGS SECTION ====== */
-  yPos = 110;
-  doc.setFillColor(...primaryColor);
-  doc.rect(10, yPos, 90, 8, 'F');
+  /* ====== EARNINGS SECTION (table-style, gridlines) ====== */
+  const earningsX = 10;
+  const earningsW = 90;
+  let earningsY = 110;
 
+  // header
+  doc.setFillColor(...primaryColor);
+  doc.rect(earningsX, earningsY, earningsW, 8, 'F');
   doc.setFontSize(11);
   doc.setTextColor(...white);
   doc.setFont(undefined, 'bold');
-  addText(t.earnings, 15, yPos + 6);
+  addText(t.earnings, earningsX + 5, earningsY + 6);
 
-  yPos += 12;
+  // container border
+  doc.setDrawColor(220);
+  doc.rect(earningsX - 2, earningsY - 6, earningsW + 4, 72);
+
+  earningsY += 12;
   doc.setTextColor(...darkColor);
   doc.setFont(undefined, 'normal');
 
-  // Base Salary
-  addText(t.baseSalary, 15, yPos);
-  addText(formatCurrency(employee.salary, settings.currency), 80, yPos, { align: 'right' });
+  // Base Salary row
+  addText(t.baseSalary, earningsX + 5, earningsY);
+  addText(formatCurrency(employee.salary, settings.currency), earningsX + earningsW - 10, earningsY, { align: 'right' });
+  doc.line(earningsX + 2, earningsY + 3, earningsX + earningsW - 2, earningsY + 3);
 
-  // Bonuses
-  yPos += 7;
+  // Bonuses rows
+  earningsY += 7;
   if (bonuses && bonuses.length > 0) {
     bonuses.forEach((bonus, index) => {
-      addText(`${t.bonuses} ${index + 1}: ${bonus.reason || ''}`, 15, yPos);
-      addText(formatCurrency(bonus.amount, settings.currency), 80, yPos, { align: 'right' });
-      yPos += 7;
+      addText(`${t.bonuses} ${index + 1}: ${bonus.reason || ''}`, earningsX + 5, earningsY);
+      addText(formatCurrency(bonus.amount, settings.currency), earningsX + earningsW - 10, earningsY, { align: 'right' });
+      doc.line(earningsX + 2, earningsY + 3, earningsX + earningsW - 2, earningsY + 3);
+      earningsY += 7;
     });
   }
 
   const totalBonuses = bonuses.reduce((sum, b) => sum + (b.amount || 0), 0);
   doc.setFont(undefined, 'bold');
-  addText(t.totalBonuses, 15, yPos);
-  addText(formatCurrency(totalBonuses, settings.currency), 80, yPos, { align: 'right' });
+  addText(t.totalBonuses, earningsX + 5, earningsY);
+  addText(formatCurrency(totalBonuses, settings.currency), earningsX + earningsW - 10, earningsY, { align: 'right' });
+  doc.line(earningsX + 2, earningsY + 6, earningsX + earningsW - 2, earningsY + 6);
 
-  yPos += 10;
+  earningsY += 8;
   doc.setFillColor(...lightGray);
-  doc.rect(10, yPos - 4, 90, 8, 'F');
-  addText(t.totalEarnings, 15, yPos + 2);
-  addText(formatCurrency(employee.salary + totalBonuses, settings.currency), 80, yPos + 2, { align: 'right' });
+  doc.rect(earningsX, earningsY - 4, earningsW, 8, 'F');
+  addText(t.totalEarnings, earningsX + 5, earningsY + 2);
+  addText(formatCurrency(employee.salary + totalBonuses, settings.currency), earningsX + earningsW - 10, earningsY + 2, { align: 'right' });
 
-  /* ====== DEDUCTIONS SECTION ====== */
-  yPos = 110;
+  /* ====== DEDUCTIONS SECTION (table-style) ====== */
+  const dedX = 110;
+  const dedW = 90;
+  let dedY = 110;
+
+  // header
   doc.setFillColor(...primaryColor);
-  doc.rect(110, yPos, 90, 8, 'F');
-
+  doc.rect(dedX, dedY, dedW, 8, 'F');
   doc.setTextColor(...white);
   doc.setFont(undefined, 'bold');
-  addText(t.deductions, 115, yPos + 6);
+  addText(t.deductions, dedX + 5, dedY + 6);
 
-  yPos += 12;
+  // container border
+  doc.setDrawColor(220);
+  doc.rect(dedX - 2, dedY - 6, dedW + 4, 72);
+
+  dedY += 12;
   doc.setTextColor(...darkColor);
   doc.setFont(undefined, 'normal');
 
   // Regular deduction
-  addText(t.deduction, 115, yPos);
-  addText(formatCurrency(employee.deduction || 0, settings.currency), 180, yPos, { align: 'right' });
+  addText(t.deduction, dedX + 5, dedY);
+  addText(formatCurrency(employee.deduction || 0, settings.currency), dedX + dedW - 10, dedY, { align: 'right' });
+  doc.line(dedX + 2, dedY + 3, dedX + dedW - 2, dedY + 3);
 
   // Leave deduction (if applicable)
-  yPos += 7;
+  dedY += 7;
   const leaveDeduction = leaveDays > 0 ? (employee.salary / 30) * leaveDays : 0;
   if (leaveDays > 0) {
-    addText(`${t.leaveDays}: ${leaveDays}`, 115, yPos);
-    addText(formatCurrency(leaveDeduction, settings.currency), 180, yPos, { align: 'right' });
+    addText(`${t.leaveDays}: ${leaveDays}`, dedX + 5, dedY);
+    addText(formatCurrency(leaveDeduction, settings.currency), dedX + dedW - 10, dedY, { align: 'right' });
+    doc.line(dedX + 2, dedY + 3, dedX + dedW - 2, dedY + 3);
+    dedY += 7;
   }
 
-  yPos += 10;
   const totalDeductions = (employee.deduction || 0) + leaveDeduction;
   doc.setFillColor(...lightGray);
-  doc.rect(110, yPos - 4, 90, 8, 'F');
+  doc.rect(dedX, dedY - 4, dedW, 8, 'F');
   doc.setFont(undefined, 'bold');
-  addText(t.totalDeductions, 115, yPos + 2);
-  addText(formatCurrency(totalDeductions, settings.currency), 180, yPos + 2, { align: 'right' });
+  addText(t.totalDeductions, dedX + 5, dedY + 2);
+  addText(formatCurrency(totalDeductions, settings.currency), dedX + dedW - 10, dedY + 2, { align: 'right' });
 
   /* ====== NET SALARY ====== */
   yPos += 20;

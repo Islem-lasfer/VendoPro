@@ -34,43 +34,41 @@ function generateBonCommande() {
   doc.text("[NOM CLIENT]", 130, 52);
   doc.text("[Adresse client complète]", 130, 58);
 
-  /* ====== TABLEAU PRODUITS ====== */
+  /* ====== TABLEAU PRODUITS (spreadsheet-style) ====== */
   doc.autoTable({
     startY: 75,
-    head: [[
-      "DESCRIPTION",
-      "PRIX (€)",
-      "QUANTITÉ",
-      "TOTAL (€)"
-    ]],
+    head: [["DESCRIPTION", "QUANTITÉ", "PRIX (€)", "TOTAL (€)"]],
     body: [
-      ["Création de logo", "900", "1", "900"],
-      ["Conception d’un flyer", "300", "1", "300"],
-      ["Carte de visite", "300", "1", "300"],
-      ["Illustration personnalisée", "200", "4", "800"],
+      ["Création de logo", 1, "900,00", "900,00"],
+      ["Conception d’un flyer", 1, "300,00", "300,00"],
+      ["Carte de visite", 1, "300,00", "300,00"],
+      ["Illustration personnalisée", 4, "200,00", "800,00"]
     ],
-    headStyles: {
-      fillColor: noir,
-      textColor: 255,
-      halign: "center"
-    },
-    bodyStyles: {
-      halign: "center"
-    },
-    styles: {
-      fontSize: 10
-    }
+    theme: 'grid',
+    styles: { fontSize: 10, cellPadding: 3, lineColor: 220 },
+    headStyles: { fillColor: [245,245,245], textColor: 0, halign: 'center', fontStyle: 'bold' },
+    columnStyles: { 0: { halign: 'left', cellWidth: 95 }, 1: { halign: 'center', cellWidth: 25 }, 2: { halign: 'right', cellWidth: 35 }, 3: { halign: 'right', cellWidth: 35 } },
+    alternateRowStyles: { fillColor: [250,250,250] }
   });
 
-  /* ====== TOTAUX ====== */
-  const finalY = doc.lastAutoTable.finalY + 10;
+  /* ====== TOTAUX (boxed, right-aligned) ====== */
+  const finalY = doc.lastAutoTable.finalY + 8;
+  doc.setDrawColor(200);
+  doc.setLineWidth(0.5);
+  doc.rect(110, finalY - 6, 90, 34);
 
   doc.setFontSize(10);
-  doc.text("Sous-total : 2 300 €", 140, finalY);
-  doc.text("TVA (20%) : 460 €", 140, finalY + 7);
+  doc.setFont(undefined, 'normal');
+  doc.text('Sous-total', 120, finalY + 2);
+  doc.text('2 300,00 €', 195, finalY + 2, { align: 'right' });
 
-  doc.setFontSize(14);
-  doc.text("TOTAL À PAYER : 2 760 €", 140, finalY + 18);
+  doc.text('TVA (20%)', 120, finalY + 10);
+  doc.text('460,00 €', 195, finalY + 10, { align: 'right' });
+
+  doc.setFontSize(13);
+  doc.setFont(undefined, 'bold');
+  doc.text('TOTAL À PAYER', 120, finalY + 24);
+  doc.text('2 760,00 €', 195, finalY + 24, { align: 'right' });
 
   /* ====== CONDITIONS ====== */
   doc.setFontSize(10);
