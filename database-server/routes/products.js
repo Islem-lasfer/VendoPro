@@ -93,10 +93,10 @@ router.get('/search', async (req, res) => {
           COALESCE(SUM(pl.quantity), 0) as totalQuantity
         FROM products p
         LEFT JOIN product_locations pl ON p.id = pl.productId
-        WHERE p.name LIKE ? OR p.barcode LIKE ? OR p.category LIKE ?
+        WHERE p.name LIKE ? OR p.barcode LIKE ? OR p.category LIKE ? OR p.reference LIKE ?
         GROUP BY p.id
         ORDER BY p.name
-      `, [`%${query}%`, `%${query}%`, `%${query}%`]);
+      `, [`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`]);
 
       for (const row of rows) {
         const [locRows] = await pool.query(`
@@ -129,9 +129,9 @@ router.get('/search', async (req, res) => {
         p.*,
         (SELECT COALESCE(SUM(quantity), 0) FROM product_locations WHERE productId = p.id) as totalQuantity
       FROM products p
-      WHERE p.name LIKE ? OR p.barcode LIKE ? OR p.category LIKE ?
+      WHERE p.name LIKE ? OR p.barcode LIKE ? OR p.category LIKE ? OR p.reference LIKE ?
       ORDER BY p.name
-    `).all(`%${query}%`, `%${query}%`, `%${query}%`);
+    `).all(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
 
     for (const row of rows) {
       const locRows = sqliteDb.prepare(`
@@ -250,13 +250,13 @@ router.post('/', async (req, res) => {
     if (useMySQL && pool) {
       const [result] = await pool.query(
         `INSERT INTO products (barcode, name, category, price, detailPrice, wholesalePrice, 
-         expirationDate, quantity, quantityType, purchasePrice, image, serialNumber, 
-         incomplete, addedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         expirationDate, quantity, quantityType, purchasePrice, image, serialNumber, reference, 
+         incomplete, addedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           product.barcode, product.name, product.category, product.price,
           product.detailPrice, product.wholesalePrice, product.expirationDate,
           totalQuantity, product.quantityType || 'unit', product.purchasePrice,
-          product.image, product.serialNumber, product.incomplete || 0, product.addedFrom
+          product.image, product.serialNumber, product.reference || null, product.incomplete || 0, product.addedFrom
         ]
       );
 
@@ -303,8 +303,8 @@ router.post('/', async (req, res) => {
     }
 
     // SQLite fallback
-    const stmt = sqliteDb.prepare(`INSERT INTO products (barcode, name, category, price, detailPrice, wholesalePrice, expirationDate, quantity, quantityType, purchasePrice, image, serialNumber, incomplete, addedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const info = stmt.run([product.barcode, product.name, product.category, product.price, product.detailPrice, product.wholesalePrice, product.expirationDate, totalQuantity, product.quantityType || 'unit', product.purchasePrice, product.image, product.serialNumber, product.incomplete || 0, product.addedFrom]);
+    const stmt = sqliteDb.prepare(`INSERT INTO products (barcode, name, category, price, detailPrice, wholesalePrice, expirationDate, quantity, quantityType, purchasePrice, image, serialNumber, reference, incomplete, addedFrom) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const info = stmt.run([product.barcode, product.name, product.category, product.price, product.detailPrice, product.wholesalePrice, product.expirationDate, totalQuantity, product.quantityType || 'unit', product.purchasePrice, product.image, product.serialNumber, product.reference || null, product.incomplete || 0, product.addedFrom]);
     const insertedId = info.lastInsertRowid || info.lastInsertROWID || info.lastInsertId || null;
     const newProduct = { id: insertedId, ...product, totalQuantity };
 
@@ -365,14 +365,14 @@ router.put('/:id', async (req, res) => {
       await pool.query(
         `UPDATE products SET barcode = ?, name = ?, category = ?, price = ?, 
          detailPrice = ?, wholesalePrice = ?, expirationDate = ?, quantity = ?, 
-         quantityType = ?, purchasePrice = ?, image = ?, serialNumber = ?, 
+         quantityType = ?, purchasePrice = ?, image = ?, serialNumber = ?, reference = ?, 
          incomplete = ?, addedFrom = ?, updatedAt = CURRENT_TIMESTAMP 
          WHERE id = ?`,
         [
           product.barcode, product.name, product.category, product.price,
           product.detailPrice, product.wholesalePrice, product.expirationDate,
           totalQuantity, product.quantityType, product.purchasePrice,
-          product.image, product.serialNumber, product.incomplete, product.addedFrom, id
+          product.image, product.serialNumber, product.reference || null, product.incomplete, product.addedFrom, id
         ]
       );
 
@@ -462,13 +462,33 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Supprimer un produit
+// Supprimer un produit (automatic cleanup of transfers & locations)
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Nullify invoice references (preserve invoice history)
     if (useMySQL && pool) {
+      await pool.query('UPDATE invoice_items SET productId = NULL WHERE productId = ?', [id]);
+      await pool.query('UPDATE supplier_invoice_items SET productId = NULL WHERE productId = ?', [id]);
+
+      // Remove dependent inventory rows so delete won't be blocked
+      await pool.query('DELETE FROM location_transfers WHERE productId = ?', [id]);
+      await pool.query('DELETE FROM product_locations WHERE productId = ?', [id]);
+
       await pool.query('DELETE FROM products WHERE id = ?', [id]);
     } else {
+      sqliteDb.prepare('UPDATE invoice_items SET productId = NULL WHERE productId = ?').run(id);
+      sqliteDb.prepare('UPDATE supplier_invoice_items SET productId = NULL WHERE productId = ?').run(id);
+
+      // Automatic cleanup of related inventory transfer/location rows
+      try {
+        sqliteDb.prepare('DELETE FROM location_transfers WHERE productId = ?').run(id);
+      } catch (e) { console.warn('Could not delete location_transfers for product', id, e.message); }
+      try {
+        sqliteDb.prepare('DELETE FROM product_locations WHERE productId = ?').run(id);
+      } catch (e) { console.warn('Could not delete product_locations for product', id, e.message); }
+
       sqliteDb.prepare('DELETE FROM products WHERE id = ?').run([id]);
     }
 
@@ -479,6 +499,97 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Récupérer les transferts d'un produit (pour l'UI quand suppression est bloquée)
+router.get('/:id/transfers', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (useMySQL && pool) {
+      const [rows] = await pool.query(`
+        SELECT lt.*, p.name as productName, fl.name as fromLocationName, tl.name as toLocationName
+        FROM location_transfers lt
+        JOIN products p ON lt.productId = p.id
+        LEFT JOIN locations fl ON lt.fromLocationId = fl.id
+        LEFT JOIN locations tl ON lt.toLocationId = tl.id
+        WHERE lt.productId = ?
+        ORDER BY lt.date DESC
+      `, [id]);
+      return res.json(rows);
+    }
+
+    const rows = sqliteDb.prepare(`
+      SELECT lt.*, p.name as productName, fl.name as fromLocationName, tl.name as toLocationName
+      FROM location_transfers lt
+      JOIN products p ON lt.productId = p.id
+      LEFT JOIN locations fl ON lt.fromLocationId = fl.id
+      LEFT JOIN locations tl ON lt.toLocationId = tl.id
+      WHERE lt.productId = ?
+      ORDER BY lt.date DESC
+    `).all(id);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erreur lors de la récupération des transferts de produit:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Supprimer un transfert et rétablir les quantités (admin action)
+router.delete('/transfers/:transferId', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+
+    if (useMySQL && pool) {
+      const [[tRow]] = await pool.query('SELECT * FROM location_transfers WHERE id = ?', [transferId]);
+      if (!tRow) return res.status(404).json({ error: 'Transfer not found' });
+      const t = tRow;
+
+      const conn = await pool.getConnection();
+      try {
+        await conn.query('START TRANSACTION');
+        if (t.fromLocationId) {
+          await conn.query(`INSERT INTO product_locations (productId, locationId, quantity, updatedAt)
+            SELECT ?, ?, ? , CURRENT_TIMESTAMP WHERE NOT EXISTS (SELECT 1 FROM product_locations WHERE productId = ? AND locationId = ?)`, [t.productId, t.fromLocationId, t.quantity, t.productId, t.fromLocationId]);
+          await conn.query('UPDATE product_locations SET quantity = quantity + ? WHERE productId = ? AND locationId = ?', [t.quantity, t.productId, t.fromLocationId]);
+        }
+        if (t.toLocationId) {
+          await conn.query('UPDATE product_locations SET quantity = quantity - ? WHERE productId = ? AND locationId = ?', [t.quantity, t.productId, t.toLocationId]);
+        }
+        await conn.query('DELETE FROM location_transfers WHERE id = ?', [transferId]);
+        await conn.query('COMMIT');
+      } catch (e) {
+        await conn.query('ROLLBACK');
+        throw e;
+      } finally {
+        conn.release();
+      }
+
+      return res.json({ success: true });
+    }
+
+    const t = sqliteDb.prepare('SELECT * FROM location_transfers WHERE id = ?').get(transferId);
+    if (!t) return res.status(404).json({ error: 'Transfer not found' });
+
+    const db = sqliteDb;
+    db.exec('BEGIN TRANSACTION');
+    try {
+      if (t.fromLocationId) {
+        const exists = db.prepare('SELECT id FROM product_locations WHERE productId = ? AND locationId = ?').get(t.productId, t.fromLocationId);
+        if (exists) db.prepare('UPDATE product_locations SET quantity = quantity + ?, updatedAt = CURRENT_TIMESTAMP WHERE productId = ? AND locationId = ?').run(t.quantity, t.productId, t.fromLocationId);
+        else db.prepare('INSERT INTO product_locations (productId, locationId, quantity, updatedAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP)').run(t.productId, t.fromLocationId, t.quantity);
+      }
+      if (t.toLocationId) {
+        const existsTo = db.prepare('SELECT id FROM product_locations WHERE productId = ? AND locationId = ?').get(t.productId, t.toLocationId);
+        if (existsTo) db.prepare('UPDATE product_locations SET quantity = quantity - ?, updatedAt = CURRENT_TIMESTAMP WHERE productId = ? AND locationId = ?').run(t.quantity, t.productId, t.toLocationId);
+      }
+      db.prepare('DELETE FROM location_transfers WHERE id = ?').run(transferId);
+      db.exec('COMMIT');
+      res.json({ success: true });
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch(_) {}
+      throw e;
+    }
+});
+
 // Obtenir les emplacements d'un produit
 router.get('/:id/locations', async (req, res) => {
   try {

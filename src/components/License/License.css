@@ -4,12 +4,16 @@
   left: 50%;
   transform: translate(-50%, -50%);
   background: #fff;
-  padding: 32px 32px 24px 32px;
+  padding: 24px 24px 20px 24px;
   border-radius: 12px;
   box-shadow: 0 4px 32px rgba(0,0,0,0.18);
   min-width: 340px;
   z-index: 9999;
   box-sizing: border-box;
+  /* Make modal scrollable when content is too tall */
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .license-modal h2 {
   text-align: center;
@@ -21,11 +25,24 @@
 }
 .license-modal input {
   width: 100%;
-  padding: 0.7rem;
-  margin: 1rem 0;
+  padding: 0.55rem; /* slightly smaller padding */
+  margin: 0.5rem 0; /* reduced vertical margin */
   border-radius: 6px;
-  border: 1px solid #ff9800;
-  font-size: 1.1rem;
+  border: 1px solid #ddd; /* softer border for readability */
+  background: #fff; /* ensure white background */
+  color: #222; /* dark text for contrast */
+  font-size: 1.05rem;
+}
+
+.license-modal input::placeholder {
+  color: #888; /* visible placeholder color */
+}
+
+.license-modal label {
+  color: #333; /* dark label text */
+  font-weight: 600;
+  display: block;
+  margin-bottom: 6px;
 }
 .license-modal button {
   background: #ff9800;

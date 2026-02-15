@@ -32,6 +32,50 @@ function getMacAddress() {
   return null;
 }
 
+function normalizeId(id) {
+  if (!id) return null;
+  return id.toString().replace(/[^A-Z0-9]/gi, '').toUpperCase();
+}
+
+function getDiskId() {
+  try {
+    if (process.platform === 'win32') {
+      try {
+        const out = child_process_exec('wmic diskdrive get SerialNumber');
+        const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (lines.length >= 2) return normalizeId(lines[1]);
+      } catch (e) {}
+      try {
+        const out2 = child_process_exec('wmic bios get serialnumber');
+        const lines2 = out2.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (lines2.length >= 2) return normalizeId(lines2[1]);
+      } catch (e) {}
+    } else {
+      try {
+        const out = child_process_exec("lsblk -o SERIAL -dn | head -n1");
+        if (out) return normalizeId(out.trim());
+      } catch (e) {}
+      try {
+        const out = child_process_exec("ioreg -l | grep IOPlatformSerialNumber | awk '{print $4}'");
+        if (out) return normalizeId(out.replace(/\"/g, '').trim());
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return null;
+}
+
+function child_process_exec(cmd) {
+  const child = require('child_process');
+  return child.execSync(cmd).toString();
+}
+
+function getMachineId() {
+  // Prefer disk id when available, fallback to MAC
+  const disk = getDiskId();
+  if (disk) return disk;
+  return normalizeId(getMacAddress());
+}
+
 // Generate a simple license key format (for backward compatibility)
 function generateLicenseKey(mac) {
   const hash = crypto.createHash('sha256').update(mac).digest('hex').toUpperCase();
@@ -85,10 +129,15 @@ function activateOffline(licenseData, isFirstActivation = false) {
       }
     }
 
-    // STRICT Machine binding check
+    // STRICT Machine binding check (normalize both sides)
+    const normalizedPassedId = normalizeId(machine_id);
+    const normalizedPayloadId = decodedPayload.machine_id ? normalizeId(decodedPayload.machine_id) : null;
+
     // If license was previously activated, machine_id MUST match
-    if (decodedPayload.machine_id) {
-      if (decodedPayload.machine_id !== machine_id) {
+    if (normalizedPayloadId) {
+      if (normalizedPayloadId !== normalizedPassedId) {
+        // Log only the current machine id to avoid revealing the bound machine id in logs/UI
+        console.log('❌ Machine ID mismatch — current:', normalizedPassedId);
         return { 
           success: false, 
           error: `License is bound to another machine. This license can only be used on the machine where it was first activated.`
@@ -97,7 +146,7 @@ function activateOffline(licenseData, isFirstActivation = false) {
     }
     // If first activation and payload doesn't have machine_id, bind it now
     else if (isFirstActivation) {
-      decodedPayload.machine_id = machine_id;
+      decodedPayload.machine_id = normalizedPassedId;
     }
 
     return {
@@ -145,6 +194,9 @@ async function activateLicense(licenseKey, machineId, licenseData = null, isFirs
 
 module.exports = {
   getMacAddress,
+  getDiskId,
+  getMachineId,
+  normalizeId,
   generateLicenseKey,
   activateLicense,
   activateOffline,

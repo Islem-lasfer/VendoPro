@@ -47,13 +47,14 @@ function logWarning(message) {
 }
 
 // Test data
+const rawMachineId = license.getMachineId() || 'TEST-MACHINE';
 const TEST_LICENSE = {
   license_key: 'TEST-1234-ABCD-5678',
-  machine_id: license.getMacAddress() || 'TEST-MACHINE',
+  machine_id: license.normalizeId ? license.normalizeId(rawMachineId) : rawMachineId,
   payload: Buffer.from(JSON.stringify({
     license_key: 'TEST-1234-ABCD-5678',
     expire_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-    machine_id: license.getMacAddress() || 'TEST-MACHINE'
+    machine_id: license.normalizeId ? license.normalizeId(rawMachineId) : rawMachineId
   })).toString('base64'),
   signature: 'dummy-signature-for-testing' // En production, ceci serait une vraie signature RSA
 };
@@ -61,7 +62,7 @@ const TEST_LICENSE = {
 async function testMachineId() {
   logTitle('TEST 1: Récupération du Machine ID');
   
-  const machineId = license.getMacAddress();
+  const machineId = license.getMachineId();
   
   if (machineId) {
     logSuccess(`Machine ID récupéré: ${machineId}`);

@@ -10,6 +10,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('html2canvas')) return 'vendor_html2canvas';
+            if (id.includes('purify.es') || id.includes('purify')) return 'vendor_purify';
+            return 'vendor';
+          }
+        }
+      }
+    }
   }
 });

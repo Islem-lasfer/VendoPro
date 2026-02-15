@@ -15,12 +15,15 @@ const createTables = (db) => {
       purchasePrice REAL,
       image TEXT,
       serialNumber TEXT,
+      reference TEXT,
       incomplete INTEGER DEFAULT 0,
       addedFrom TEXT,
       createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
       updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: add reference column if it's missing
+  try { db.exec('ALTER TABLE products ADD COLUMN reference TEXT'); } catch (e) {} 
 
   console.log('✅ Products table created or already exists!');
 
@@ -53,15 +56,30 @@ const createTables = (db) => {
       companyAddress TEXT,
       companyContact TEXT,
       companyTaxId TEXT,
+      companyRC TEXT,
+      companyAI TEXT,
+      companyNIS TEXT,
       garantieDuration TEXT,
       garantieEndDate TEXT,
       notes TEXT,
       type TEXT,
       source TEXT,
       debt REAL DEFAULT 0,
-      paid REAL DEFAULT 0
+      paid REAL DEFAULT 0,
+      createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Add createdAt/updatedAt columns to invoices if missing (migration)
+  try { db.exec('ALTER TABLE invoices ADD COLUMN createdAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+  try { db.exec('ALTER TABLE invoices ADD COLUMN updatedAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+  // Ensure newly added invoice columns exist
+  try { ensureColumn('invoices', 'companyRC', 'companyRC TEXT'); } catch (e) {}
+  try { ensureColumn('invoices', 'companyAI', 'companyAI TEXT'); } catch (e) {}
+  try { ensureColumn('invoices', 'companyNIS', 'companyNIS TEXT'); } catch (e) {}
+  try { ensureColumn('invoices', 'clientRC', 'clientRC TEXT'); } catch (e) {}
+  try { ensureColumn('invoices', 'clientAI', 'clientAI TEXT'); } catch (e) {}
+  try { ensureColumn('invoices', 'clientNIS', 'clientNIS TEXT'); } catch (e) {}
 
   // Invoice items table
   db.exec(`
@@ -93,12 +111,25 @@ const createTables = (db) => {
       total REAL NOT NULL,
       paid REAL DEFAULT 0,
       status TEXT DEFAULT 'pending',
-      notes TEXT
+      notes TEXT,
+      createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
   
   // Add debt column to supplier_invoices if not exists (migration)
   try { db.exec('ALTER TABLE supplier_invoices ADD COLUMN debt REAL DEFAULT 0'); } catch (e) {}
+  // Add createdAt/updatedAt columns to supplier_invoices if missing (migration)
+  try { db.exec('ALTER TABLE supplier_invoices ADD COLUMN createdAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+  try { db.exec('ALTER TABLE supplier_invoices ADD COLUMN updatedAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+
+  // Ensure supplier_invoices columns exist (safer)
+  try { ensureColumn('supplier_invoices', 'paid', 'paid REAL DEFAULT 0'); } catch (e) {}
+  try { ensureColumn('supplier_invoices', 'debt', 'debt REAL DEFAULT 0'); } catch (e) {}
+  try { ensureColumn('supplier_invoices', 'status', "status TEXT DEFAULT 'pending'"); } catch (e) {}
+  try { ensureColumn('supplier_invoices', 'supplierPhone', 'supplierPhone TEXT'); } catch (e) {}
+  try { ensureColumn('supplier_invoices', 'createdAt', 'createdAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+  try { ensureColumn('supplier_invoices', 'updatedAt', 'updatedAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
 
   // Supplier invoice items table
   db.exec(`
@@ -116,6 +147,27 @@ const createTables = (db) => {
     )
   `);
   try { db.exec('ALTER TABLE supplier_invoice_items ADD COLUMN quantityType TEXT DEFAULT "unit"'); } catch (e) {}
+
+  // Migration: ensure supplierInvoiceId exists (some older DBs used different column names)
+  try {
+    const cols = db.prepare('PRAGMA table_info(supplier_invoice_items)').all();
+    const hasCamel = cols.find(c => c.name === 'supplierInvoiceId');
+    const hasUnderscore = cols.find(c => c.name === 'supplier_invoice_id');
+    if (!hasCamel) {
+      db.exec('ALTER TABLE supplier_invoice_items ADD COLUMN supplierInvoiceId INTEGER');
+      console.log('✅ Migration: added column supplierInvoiceId to supplier_invoice_items');
+      if (hasUnderscore) {
+        try {
+          db.exec('UPDATE supplier_invoice_items SET supplierInvoiceId = supplier_invoice_id');
+          console.log('✅ Migration: copied supplier_invoice_id -> supplierInvoiceId');
+        } catch (e) {
+          console.warn('⚠️ Migration: could not copy supplier_invoice_id -> supplierInvoiceId:', e.message);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ Migration: supplier_invoice_items supplierInvoiceId check failed:', e.message);
+  }
 
   // Employees table
   db.exec(`
@@ -138,6 +190,29 @@ const createTables = (db) => {
       createdAt TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration helper: adds column only if missing (safer than blind ALTER TABLE)
+  function ensureColumn(table, column, definition) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+      const exists = cols && cols.find(c => c.name === column);
+      if (!exists) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+        console.log(`✅ Migration: added column ${column} to ${table}`);
+      }
+    } catch (e) {
+      // Not fatal; continue
+      console.warn(`⚠️ Migration: could not ensure column ${column} on ${table}:`, e.message);
+    }
+  }
+
+  // Ensure employee-related columns exist (fixes missing-column errors on older DBs)
+  ensureColumn('employees', 'updatedAt', 'updatedAt TEXT DEFAULT CURRENT_TIMESTAMP');
+  ensureColumn('employees', 'absences', 'absences INTEGER DEFAULT 0');
+  ensureColumn('employees', 'startDate', 'startDate TEXT');
+  ensureColumn('employees', 'leaveBalance', 'leaveBalance REAL DEFAULT 0');
+  ensureColumn('employees', 'hireDate', 'hireDate TEXT');
+  ensureColumn('employees', 'status', "status TEXT DEFAULT 'active'");
 
   // Employee Leave table
   db.exec(`
@@ -186,6 +261,9 @@ const createTables = (db) => {
     )
   `);
 
+  // Add updatedAt column to locations if not exists (migration)
+  try { db.exec('ALTER TABLE locations ADD COLUMN updatedAt TEXT DEFAULT CURRENT_TIMESTAMP'); } catch (e) {}
+
   // Default locations handled later using a safer query/insert approach.
 
   // Clients table (customers)
@@ -198,6 +276,9 @@ const createTables = (db) => {
       address TEXT,
       companyName TEXT,
       taxId TEXT,
+      rc TEXT,
+      ai TEXT,
+      nis TEXT,
       createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
       updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
     )
@@ -205,6 +286,10 @@ const createTables = (db) => {
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)'); } catch (e) {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone)'); } catch (e) {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)'); } catch (e) {}
+  // Ensure new client identifier columns exist on older DBs
+  try { ensureColumn('clients', 'rc', 'rc TEXT'); } catch (e) {}
+  try { ensureColumn('clients', 'ai', 'ai TEXT'); } catch (e) {}
+  try { ensureColumn('clients', 'nis', 'nis TEXT'); } catch (e) {}
 
   // Product Locations table (quantity per location)
   db.exec(`
@@ -223,6 +308,7 @@ const createTables = (db) => {
   `);
 
   // Location Transfers table (track inventory movements)
+  // NOTE: productId now uses ON DELETE CASCADE so transfers are removed when a product is removed.
   db.exec(`
     CREATE TABLE IF NOT EXISTS location_transfers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,11 +318,44 @@ const createTables = (db) => {
       quantity REAL NOT NULL,
       reason TEXT,
       date TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (productId) REFERENCES products(id),
+      FOREIGN KEY (productId) REFERENCES products(id) ON DELETE CASCADE,
       FOREIGN KEY (fromLocationId) REFERENCES locations(id),
       FOREIGN KEY (toLocationId) REFERENCES locations(id)
     )
   `);
+
+  // Migration: ensure location_transfers productId FK uses ON DELETE CASCADE (SQLite requires table rebuild)
+  try {
+    const fkInfo = db.prepare("PRAGMA foreign_key_list(location_transfers)").all();
+    const prodFk = fkInfo && fkInfo.find(f => f.table === 'products' && f.from === 'productId');
+    if (prodFk && prodFk.on_delete !== 'CASCADE') {
+      console.log('🔁 Migration: rebuilding location_transfers to add ON DELETE CASCADE on productId');
+      db.exec('BEGIN TRANSACTION');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS __location_transfers_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          productId INTEGER NOT NULL,
+          fromLocationId INTEGER,
+          toLocationId INTEGER,
+          quantity REAL NOT NULL,
+          reason TEXT,
+          date TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (productId) REFERENCES products(id) ON DELETE CASCADE,
+          FOREIGN KEY (fromLocationId) REFERENCES locations(id),
+          FOREIGN KEY (toLocationId) REFERENCES locations(id)
+        )
+      `);
+      db.exec(`INSERT INTO __location_transfers_new (id, productId, fromLocationId, toLocationId, quantity, reason, date)
+               SELECT id, productId, fromLocationId, toLocationId, quantity, reason, date FROM location_transfers`);
+      db.exec('DROP TABLE location_transfers');
+      db.exec('ALTER TABLE __location_transfers_new RENAME TO location_transfers');
+      db.exec('COMMIT');
+      console.log('✅ Migration: location_transfers rebuilt with ON DELETE CASCADE');
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch(_) {}
+    console.warn('⚠️ Migration: could not ensure ON DELETE CASCADE for location_transfers:', e.message);
+  }
 
 try {
     const existingLocations = db.prepare('SELECT COUNT(*) as count FROM locations').get();

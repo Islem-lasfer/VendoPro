@@ -11,6 +11,12 @@ const columns = [
   { name: 'companyAddress', type: 'TEXT' },
   { name: 'companyContact', type: 'TEXT' },
   { name: 'companyTaxId', type: 'TEXT' },
+  { name: 'companyRC', type: 'TEXT' },
+  { name: 'companyAI', type: 'TEXT' },
+  { name: 'companyNIS', type: 'TEXT' },
+  { name: 'clientRC', type: 'TEXT' },
+  { name: 'clientAI', type: 'TEXT' },
+  { name: 'clientNIS', type: 'TEXT' },
   { name: 'garantieDuration', type: 'TEXT' },
   { name: 'garantieEndDate', type: 'TEXT' },
   { name: 'source', type: 'TEXT' }

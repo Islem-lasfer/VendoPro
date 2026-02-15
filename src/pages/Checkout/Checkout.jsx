@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+
 import { useSettings } from '../../context/SettingsContext';
 import { formatCurrency } from '../../utils/currency';
 import { getAllProducts, getProductByBarcode, createInvoice } from '../../utils/database';
@@ -7,7 +8,7 @@ import tpeIntegration from '../../utils/tpeIntegration';
 import NumericInput from '../../components/NumericInput/NumericInput';
 import Notification from '../../components/Notification/Notification';
 import ConfirmDialog from '../../components/Notification/ConfirmDialog';
-import JsBarcode from 'jsbarcode';
+import { generateBarcodeDataUrl } from '../../utils/barcode';
 import './Checkout.css';
 
 // Conditionally import ipcRenderer for Electron environment
@@ -21,28 +22,32 @@ try {
   console.warn('ipcRenderer not available:', error.message); 
 }
 
-const generateBarcodeDataUrl = (text, options = {}) => {
-  try {
-    const canvas = document.createElement('canvas');
-    JsBarcode(canvas, String(text), { format: 'CODE128', displayValue: true, height: 40, margin: 0, ...options });
-    return canvas.toDataURL('image/png');
-  } catch (e) {
-    console.warn('Barcode generation failed', e);
-    return null;
-  }
-};
-
 const Checkout = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+
+  useEffect(() => {
+    // Debug: show active language and resolved translation for the optional client-name label
+    try {
+      console.debug('[i18n] Checkout language:', i18n.language, '->', t('SalesByInvoices.clientNameOptional'));
+      console.debug('[i18n] force lookup same key with lng option ->', t('SalesByInvoices.clientNameOptional', { lng: i18n.language }));
+      console.debug('[i18n] getResource(zh):', i18n.getResource && i18n.getResource(i18n.language, 'translation', 'SalesByInvoices.clientNameOptional'));
+      console.debug('[i18n] available languages:', i18n.languages);
+    } catch (e) {
+      console.debug('[i18n] Checkout translation debug failed:', e && e.message);
+    }
+  }, [i18n.language, t]);
   const { settings } = useSettings();
   const [barcode, setBarcode] = useState('');
 
   // Manual Montant (amount) modal for quick manual add when barcode/product missing or has no price
   const [showManualItemModal, setShowManualItemModal] = useState(false);
   const [manualItemData, setManualItemData] = useState({ name: '', price: '', quantity: '1', quantityType: 'unit', _linkedProductId: null });
+  // Quick product search inside manual-add modal (name or `reference`/SKU)
+  const [manualProductQuery, setManualProductQuery] = useState('');
 
   const openManualItemModal = (prefill = {}) => {
     setManualItemData({ name: '', price: '', quantity: '1', quantityType: 'unit', _linkedProductId: null, ...prefill });
+    setManualProductQuery(prefill.productName || prefill.name || '');
     setShowManualItemModal(true);
     setTimeout(() => {
       barcodeInputRef.current?.blur();
@@ -54,6 +59,7 @@ const Checkout = () => {
   const closeManualItemModal = () => {
     setShowManualItemModal(false);
     setManualItemData({ name: '', price: '', quantity: '1', quantityType: 'unit', _linkedProductId: null });
+    setManualProductQuery('');
     setTimeout(() => barcodeInputRef.current?.focus(), 100);
   };
 
@@ -147,7 +153,10 @@ const Checkout = () => {
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [receiptData, setReceiptData] = useState(null);
   const [debtAmount, setDebtAmount] = useState(0);
-  const [paidAmount, setPaidAmount] = useState(0);
+  // paidAmount is now optional (string) so user can clear it — parseFloat used when needed
+  const [paidAmount, setPaidAmount] = useState('');
+  // optional client name shown in payment modal (Checkout does not require clients)
+  const [paymentClientName, setPaymentClientName] = useState('');
   const barcodeInputRef = useRef(null);
   const quantityInputRef = useRef(null);
   
@@ -230,9 +239,31 @@ const Checkout = () => {
   const discount = activeTab.discount;
   const total = activeTab.total;
 
+  // `discountInput` keeps the raw text while typing so partial decimals are preserved (e.g. "0.")
+  const [discountInput, setDiscountInput] = useState(() => ((activeTab && activeTab.discount) || 0).toFixed(2));
+
+  // Mirror active tab's numeric discount to the edit buffer unless the user is actively editing the field
+  useEffect(() => {
+    try {
+      const activeIsDiscount = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('discount-input');
+      if (!activeIsDiscount) setDiscountInput(((activeTab && activeTab.discount) || 0).toFixed(2));
+    } catch (e) {
+      setDiscountInput(((activeTab && activeTab.discount) || 0).toFixed(2));
+    }
+  }, [activeTabId, tabs]);
+
   // Load products from database
   const [products, setProducts] = useState([]);
-  
+
+  const manualProductResults = manualProductQuery.trim().length > 0
+    ? products.filter(p => ((p.name || '').toLowerCase().includes(manualProductQuery.toLowerCase()) || (p.reference || '').toLowerCase().includes(manualProductQuery.toLowerCase()))).slice(0, 8)
+    : [];
+  const selectManualProduct = (p) => {
+    setManualItemData(fd => ({ ...fd, name: p.name || fd.name, price: (p.price || p.detailPrice || p.wholesalePrice || 0), _linkedProductId: p.id, productName: p.name }));
+    setManualProductQuery(p.name || '');
+    setTimeout(() => document.getElementById('manual-amount-input')?.focus(), 50);
+  };
+
   // Save tabs to localStorage whenever they change
   useEffect(() => {
     localStorage.setItem('checkoutTabs', JSON.stringify(tabs));
@@ -302,6 +333,39 @@ const Checkout = () => {
       }
     };
   }, []);
+
+  // When Enter is pressed while barcode input has focus:
+  // - if barcode field has text => submit barcode (existing behavior)
+  // - if barcode field is empty => open qty editor for the last product added
+  const handleBarcodeKeyDown = (e) => {
+    if (e.key !== 'Enter') return;
+    const code = (barcode || '').trim();
+
+    if (code) {
+      e.preventDefault();
+      handleBarcodeSubmit(code);
+      return;
+    }
+
+    // No barcode typed — open quantity editor for last item
+    const currentCart = activeTab?.cart || [];
+    if (!currentCart || currentCart.length === 0) return; // nothing to edit
+
+    e.preventDefault();
+    const lastIndex = currentCart.length - 1;
+    const lastItem = currentCart[lastIndex];
+
+    setSelectedItemIndex(lastIndex);
+    setEditingItemId(lastItem.id);
+    setEditingQuantity(String(lastItem.quantity || 1));
+
+    // focus the quantity input when it renders
+    setTimeout(() => {
+      if (quantityInputRef.current) {
+        try { quantityInputRef.current.focus(); quantityInputRef.current.select && quantityInputRef.current.select(); } catch (err) {}
+      }
+    }, 50);
+  };
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -416,7 +480,10 @@ const Checkout = () => {
           if (selectedItem) {
             setEditingItemId(selectedItem.id);
             setEditingQuantity(selectedItem.quantity.toString());
-            setTimeout(() => quantityInputRef.current?.focus(), 100);
+            setTimeout(() => {
+              const el = quantityInputRef.current;
+              if (el) { el.focus(); if (el.select) el.select(); }
+            }, 100);
           }
         }
       } else if (e.key === 'ArrowUp' && !e.ctrlKey) {
@@ -635,32 +702,58 @@ const Checkout = () => {
       return;
     }
     
+    // Recompute totals from the cart to avoid stale values
+    const computedSubtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    const computedDiscount = computedSubtotal * (settings.discountRate / 100);
+    const computedAfterDiscount = computedSubtotal - computedDiscount;
+    const computedTax = computedAfterDiscount * (settings.taxRate / 100);
+    const computedTotal = computedAfterDiscount + computedTax;
+
     // Prepare receipt data for preview
     const receipt = {
       invoiceNumber: `INV-${Date.now()}`,
       items: cart.map(item => ({...item, quantityType: item.quantityType || 'unit'})),
-      subtotal,
-      discount,
-      tax,
-      total,
+      subtotal: computedSubtotal,
+      discount: computedDiscount,
+      tax: computedTax,
+      total: computedTotal,
       paymentMethod: selectedPaymentMethod,
-      date: new Date().toLocaleString()
+      date: new Date().toLocaleString(),
+      debt: debtAmount || 0,
+      paid: paidAmount || 0,
+      paymentStatus: debtAmount > 0 ? 'partial' : 'paid'
     };
-    
+
     setReceiptData(receipt);
     setShowReceiptPreview(true);
   };
 
   const handlePrint = () => {
     if (ipcRenderer && receiptData) {
-      ipcRenderer.send('print-receipt', {
+      // Build payload and include configured receipt printer (if any)
+      const payload = {
         items: receiptData.items,
         subtotal: receiptData.subtotal,
         tax: receiptData.tax,
         total: receiptData.total,
-        date: receiptData.date
+        date: receiptData.date,
+        debt: receiptData.debt || 0,
+        paid: receiptData.paid || 0,
+        paymentStatus: receiptData.paymentStatus || 'paid',
+        printerName: settings.receiptPrinter || undefined,
+        showDialog: !!settings.printDialogOnPrint
+      };
+
+      // Listen once for result then send
+      ipcRenderer.once('print-result', (ev, result) => {
+        if (result && result.success) {
+          showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+        } else {
+          showNotification((result && result.error) || t('checkout.printFailed') || 'Print failed', 'error');
+        }
       });
-      showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+
+      ipcRenderer.send('print-receipt', payload);
     }
     setShowReceiptPreview(false);
     setReceiptData(null); // Clear receipt data after printing
@@ -679,8 +772,9 @@ const Checkout = () => {
   useEffect(() => {
     if (showPaymentModal) {
       const validTotal = total || 0;
-      setPaidAmount(validTotal);
+      setPaidAmount(String(validTotal)); // prefill but field remains optional (user can clear)
       setDebtAmount(0);
+      setPaymentClientName(''); // reset optional client name when modal opens
     }
   }, [showPaymentModal, total]);
 
@@ -769,8 +863,9 @@ const Checkout = () => {
       tax,
       total,
       paymentMethod: selectedPaymentMethod,
+      customerName: paymentClientName || null,
       debt: debtAmount,
-      paid: paidAmount,
+      paid: parseFloat(paidAmount) || 0,
       locationId: selectedLocationId, // Track which location this sale is from
       items: cart.map(item => ({
         // Use real product id when available (e.g., linked manual items define productId). For pure manual items set productId to null.
@@ -845,6 +940,7 @@ const Checkout = () => {
         tax,
         total,
         paymentMethod: selectedPaymentMethod,
+        clientName: paymentClientName || '',
         date: new Date().toLocaleString()
       };
       
@@ -917,7 +1013,7 @@ const Checkout = () => {
               placeholder={t('checkout.scanProduct')}
               value={barcode}
               onChange={(e) => setBarcode(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleBarcodeSubmit()}
+              onKeyDown={handleBarcodeKeyDown}
               autoFocus
             />
             <button className="scan-btn" onClick={() => handleBarcodeSubmit()}>
@@ -929,6 +1025,7 @@ const Checkout = () => {
           </div> 
 
           <div className="cart-items">
+            
             {cart.length === 0 ? (
               <div className="empty-cart">
                 <p>🛒 {t('checkout.cartEmpty')}</p>
@@ -939,7 +1036,17 @@ const Checkout = () => {
                   key={item.id} 
                   className={`cart-item ${selectedItemIndex === index ? 'selected' : ''}`}
                   onClick={() => setSelectedItemIndex(index)}
+                  onDoubleClick={() => {
+                    setSelectedItemIndex(index);
+                    setEditingItemId(item.id);
+                    setEditingQuantity(item.quantity.toString());
+                    setTimeout(() => {
+                      const el = quantityInputRef.current;
+                      if (el) { el.focus(); if (el.select) el.select(); }
+                    }, 100);
+                  }}
                 >
+
                   <div className="item-info">
                     <h3 className="item-name">
                       {item.name}
@@ -1047,22 +1154,33 @@ const Checkout = () => {
                 <NumericInput
                   id="checkout-discount-input"
                   className="discount-input"
-                  value={discount.toFixed(2)}
+                  value={discountInput}
                   onChange={(e) => {
-                    let newDiscount = parseFloat(e.target.value) || 0;
-                    if (newDiscount > subtotal) newDiscount = subtotal;
-                    if (newDiscount < 0) newDiscount = 0;
-                    setTabs(tabs.map(tab =>
-                      tab.id === activeTabId
-                        ? { 
-                            ...tab, 
-                            discount: newDiscount,
-                            total: Math.max(0, tab.subtotal - newDiscount + tab.tax)
-                          }
-                        : tab
-                    ));
+                    const raw = String(e.target.value);
+                    // preserve user's raw input so partial decimals aren't lost
+                    setDiscountInput(raw);
+                    const normalized = raw.replace(',', '.');
+                    const parsed = parseFloat(normalized);
+                    if (!Number.isNaN(parsed)) {
+                      let newDiscount = parsed;
+                      if (newDiscount > subtotal) newDiscount = subtotal;
+                      if (newDiscount < 0) newDiscount = 0;
+                      setTabs(tabs.map(tab =>
+                        tab.id === activeTabId
+                          ? { 
+                              ...tab, 
+                              discount: newDiscount,
+                              total: Math.max(0, tab.subtotal - newDiscount + tab.tax)
+                            }
+                          : tab
+                      ));
+                    } else if (raw.trim() === '') {
+                      // empty input => treat as 0
+                      setTabs(tabs.map(tab => tab.id === activeTabId ? { ...tab, discount: 0, total: Math.max(0, tab.subtotal + tab.tax) } : tab));
+                    }
                   }}
                   onFocus={e => e.target.select()}
+                  onBlur={() => setDiscountInput(((activeTab && activeTab.discount) || 0).toFixed(2))}
                   step="0.01"
                   min="0"
                   max={subtotal}
@@ -1174,22 +1292,29 @@ const Checkout = () => {
               <div className="debt-section" style={{ marginTop: '20px', padding: '15px', background: 'var(--card-bg)', borderRadius: '8px' }}>
                 <div className="debt-input-group" style={{ marginBottom: '15px' }}>
                   <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: 'var(--text-color)' }}>
-                    {t('checkout.paidAmount')}:
+                    {paymentClientName ? `${paymentClientName} — ` : ''}{t('checkout.paidAmount')} (optional):
                   </label>
+
                   <input
-                    type="number"
+                    type="text"
                     className="debt-input"
                     style={{ width: '100%', padding: '10px', fontSize: '16px', borderRadius: '6px', border: '2px solid var(--border-color)', background: 'var(--input-bg)', color: 'var(--text-color)' }}
-                    value={paidAmount || 0}
+                    value={paidAmount}
                     onChange={(e) => {
-                      const paid = parseFloat(e.target.value) || 0;
-                      setPaidAmount(paid);
+                      const str = e.target.value;
+                      // allow empty string (optional field)
+                      setPaidAmount(str);
+                      const paid = parseFloat(str) || 0;
                       setDebtAmount(Math.max(0, (total || 0) - paid));
                     }}
-                    step="0.01"
-                    min="0"
-                    max={total || 0}
+                    inputMode="decimal"
+                    placeholder={String(total || 0)}
                   />
+
+                  <div style={{ marginTop: '8px' }}>
+                    <label style={{ display: 'block', marginBottom: '6px' }}>{t('SalesByInvoices.clientNameOptional')}</label>
+                    <input type="text" value={paymentClientName} onChange={e => setPaymentClientName(e.target.value)} placeholder={t('SalesByInvoices.clientNameOptional')} style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border-color)' }} />
+                  </div>
                 </div>
                 
                 <div className="debt-display" style={{ padding: '10px', background: debtAmount > 0 ? '#ff6b6b20' : '#51cf6620', borderRadius: '6px', textAlign: 'center' }}>
@@ -1234,8 +1359,33 @@ const Checkout = () => {
             </div>
             <form className="manual-item-form" onSubmit={handleManualItemSubmit}>
               <div className="form-group">
-                <label>{t('SalesByInvoices.manualItemName') || 'Item name (optional)'}</label>
-                <input value={manualItemData.name} onChange={e => setManualItemData({ ...manualItemData, name: e.target.value })} placeholder={t('SalesByInvoices.manualItemNamePlaceholder') || 'e.g., Service, Tip'} />
+                <label>{t('SalesByInvoices.searchProduct') || 'Search product (name or reference)'}</label>
+                <input
+                  value={manualProductQuery}
+                  onChange={e => setManualProductQuery(e.target.value)}
+                  placeholder={t('SalesByInvoices.searchProductPlaceholder') || 'Type name or reference'}
+                  style={{ width: '100%', padding: '8px 10px', marginTop: 6 }}
+                />
+                {manualProductQuery.trim().length > 0 && (
+                  <div className="product-search-results" style={{ marginTop: 6, maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border-color, #eee)', borderRadius: 6, background: 'var(--card-bg, #fff)' }}>
+                    {manualProductResults.length === 0 ? (
+                      <div style={{ padding: 8, fontSize: 12, color: '#666' }}>{t('SalesByInvoices.noProductsFound') || 'No products found'}</div>
+                    ) : (
+                      manualProductResults.map(p => (
+                        <div key={p.id} className="product-result" onClick={() => selectManualProduct(p)} style={{ padding: 8, borderBottom: '1px solid #fafafa', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                            <div style={{ fontSize: 12, color: '#666' }}>{p.reference || p.barcode || ''}</div>
+                          </div>
+                          <div style={{ fontSize: 13, color: '#333', fontWeight: 600 }}>{formatCurrency(p.price || p.detailPrice || 0, settings.currency)}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                <label style={{ marginTop: 8 }}>{t('SalesByInvoices.manualItemName') || 'Item name (optional)'}</label>
+                <input value={manualItemData.name} onChange={e => setManualItemData({ ...manualItemData, name: e.target.value, _linkedProductId: manualItemData._linkedProductId })} placeholder={t('SalesByInvoices.manualItemNamePlaceholder') || 'e.g., Service, Tip'} />
               </div>
               <div className="form-group">
                 <label>{t('SalesByInvoices.amount') || 'Amount'}</label>
@@ -1251,8 +1401,15 @@ const Checkout = () => {
                   <option value="unit">{t('products.unit', 'Unit')}</option>
                   <option value="g">g</option>
                   <option value="kg">kg</option>
+                  <option value="tonne">tonne</option>
+                  <option value="mg">mg</option>
                   <option value="l">l</option>
+                  <option value="ml">ml</option>
+                  <option value="m">m</option>
+                  <option value="cm">cm</option>
+                  <option value="mm">mm</option>
                   <option value="box">{t('products.box', 'Box')}</option>
+                  <option value="pack">{t('products.pack', 'Pack')}</option>
                 </select>
               </div>
               <div className="form-actions">
@@ -1338,6 +1495,12 @@ const Checkout = () => {
                     <span>{t('checkout.total') || 'Total'}:</span>
                     <span>{formatCurrency(receiptData.total, settings.currency)}</span>
                   </div>
+                  {Number(receiptData.debt) > 0 && (
+                    <div className="receipt-row">
+                      <span>{t('checkout.remainingDebt') || 'Remaining Debt'}:</span>
+                      <span style={{ color: '#d6336c', fontWeight: '700' }}>{formatCurrency(Number(receiptData.debt), settings.currency)}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Payment Method */}

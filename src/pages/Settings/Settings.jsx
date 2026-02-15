@@ -5,6 +5,8 @@ import Notification from '../../components/Notification/Notification';
 import NumericInput from '../../components/NumericInput/NumericInput';
 import { isPasswordRequired, verifyPassword, updatePassword } from '../../utils/auth';
 import './Settings.css';
+import License from '../../components/License/License';
+import licenseUtil from '../../utils/license';
 
 // Conditionally import ipcRenderer for Electron environment
 let ipcRenderer = null;
@@ -32,15 +34,19 @@ const Settings = () => {
     confirmPassword: ''
   });
   const [passwordError, setPasswordError] = useState('');
-  // Auto-update UI state
-  const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'none' | 'error'
-  const [updateProgress, setUpdateProgress] = useState(null);
-  const [updateInfo, setUpdateInfo] = useState(null);
 
   // Locations management
   const [locations, setLocations] = useState([]);
   const [newLocation, setNewLocation] = useState({ name: '', type: 'shop' });
   const [showLocationModal, setShowLocationModal] = useState(false);
+  const [availablePrinters, setAvailablePrinters] = useState([]);
+
+  // License/trial UI state
+  const [licenseInfo, setLicenseInfo] = useState(null);
+  const [showLicenseModal, setShowLicenseModal] = useState(false);
+  const [licenseActionLoading, setLicenseActionLoading] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   // Load locations from database
   const loadLocations = async () => {
@@ -53,48 +59,51 @@ const Settings = () => {
     }
   };
 
+  // Load available printers for receipt selection
+  const loadPrinters = async () => {
+    if (!ipcRenderer) return;
+    try {
+      const list = await ipcRenderer.invoke('printers:get');
+      setAvailablePrinters(Array.isArray(list) ? list : []);
+    } catch (err) {
+      console.warn('Could not fetch printers:', err && err.message);
+      setAvailablePrinters([]);
+    }
+  };
+
   useEffect(() => {
     loadLocations();
+    loadPrinters();
+
+    // Load license/trial info from local activation store
+    const loadLicenseInfo = async () => {
+      try {
+        const machineId = licenseUtil.getMachineId();
+        const act = await licenseUtil.loadActivation(machineId);
+        setLicenseInfo(act);
+      } catch (err) {
+        setLicenseInfo(null);
+      }
+    };
+
+    loadLicenseInfo();
+
+    // Listen for license updates (triggered by License.jsx)
+    const onUpdated = () => loadLicenseInfo();
+    window.addEventListener('license-updated', onUpdated);
+    return () => window.removeEventListener('license-updated', onUpdated);
+  }, []);
+
+  // Get packaged app version (desktop only)
+  useEffect(() => {
+    if (!ipcRenderer) return;
+    ipcRenderer.invoke('get-app-version').then((v) => setAppVersion(v)).catch(() => {});
   }, []);
 
   // Sync localSettings with settings from context
   useEffect(() => {
     setLocalSettings(settings);
   }, [settings]);
-
-  // Auto-updater event listeners
-  useEffect(() => {
-    if (!ipcRenderer) return;
-
-    const onChecking = () => setUpdateStatus('checking');
-    const onAvailable = (event, info) => {
-      setUpdateStatus('available');
-      setUpdateInfo(info);
-    };
-    const onNotAvailable = () => setUpdateStatus('none');
-    const onProgress = (event, progress) => {
-      setUpdateStatus('downloading');
-      setUpdateProgress(progress);
-    };
-    const onDownloaded = (event, info) => {
-      setUpdateStatus('downloaded');
-      setUpdateInfo(info);
-    };
-
-    ipcRenderer.on('update-checking', onChecking);
-    ipcRenderer.on('update-available', onAvailable);
-    ipcRenderer.on('update-not-available', onNotAvailable);
-    ipcRenderer.on('update-download-progress', onProgress);
-    ipcRenderer.on('update-downloaded', onDownloaded);
-
-    return () => {
-      ipcRenderer.removeListener('update-checking', onChecking);
-      ipcRenderer.removeListener('update-available', onAvailable);
-      ipcRenderer.removeListener('update-not-available', onNotAvailable);
-      ipcRenderer.removeListener('update-download-progress', onProgress);
-      ipcRenderer.removeListener('update-downloaded', onDownloaded);
-    };
-  }, [ipcRenderer]);
 
   // Load shop settings from setup
   useEffect(() => {
@@ -106,8 +115,9 @@ const Settings = () => {
         posName: shop.posName || prev.posName,
         posLogo: shop.posLogo || prev.posLogo,
         shopAddress: shop.shopAddress || prev.shopAddress || '',
-        taxId: shop.taxId || prev.taxId || '',
-        taxRate: shop.taxRate ?? prev.taxRate,
+        taxId: shop.taxId || prev.taxId || '',        rc: shop.rc || prev.rc || '',
+        ai: shop.ai || prev.ai || '',
+        nis: shop.nis || prev.nis || '',        taxRate: shop.taxRate ?? prev.taxRate,
         discountRate: shop.discountRate ?? prev.discountRate,
         currency: shop.currency ?? prev.currency,
         phone1: shop.phone1 ?? prev.phone1,
@@ -179,6 +189,9 @@ const Settings = () => {
       posLogo: newSettings.posLogo,
       shopAddress: newSettings.shopAddress,
       taxId: newSettings.taxId,
+      rc: newSettings.rc || '',
+      ai: newSettings.ai || '',
+      nis: newSettings.nis || '',
       taxRate: newSettings.taxRate,
       discountRate: newSettings.discountRate,
       currency: newSettings.currency,
@@ -372,54 +385,6 @@ const Settings = () => {
             </div>
           </div>
 
-          {/* Application Updates */}
-          <div className="setting-card">
-            <div className="setting-header">
-              <label className="setting-label">{t('settings.updates') || 'Application Updates'}</label>
-              <p className="setting-description">{t('settings.updatesDesc') || 'Check for updates and install the latest version from the internet.'}</p>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <button
-                className="btn"
-                onClick={async () => {
-                  if (!ipcRenderer) return showNotification('Auto-update not available in this environment', 'error');
-                  setUpdateStatus('checking');
-                  try {
-                    await ipcRenderer.invoke('app:check-for-updates');
-                  } catch (err) {
-                    setUpdateStatus('error');
-                    showNotification('Update check failed: ' + err.message, 'error');
-                  }
-                }}
-              >
-                {updateStatus === 'checking' ? (t('settings.updating') || 'Checking...') : (t('settings.checkForUpdates') || 'Check for updates')}
-              </button>
-
-              {updateStatus === 'available' && (
-                <span style={{ color: 'var(--accent-color)' }}>{t('settings.updateAvailable') || `Update available: ${updateInfo?.version || ''}`}</span>
-              )}
-
-              {updateStatus === 'downloading' && (
-                <span style={{ color: 'var(--accent-color)' }}>{t('settings.downloading') || 'Downloading update...'} {updateProgress ? `${Math.round(updateProgress.percent || 0)}%` : ''}</span>
-              )}
-
-              {updateStatus === 'downloaded' && (
-                <button
-                  className="btn-primary"
-                  onClick={async () => {
-                    if (!ipcRenderer) return;
-                    try {
-                      await ipcRenderer.invoke('app:install-update');
-                    } catch (err) {
-                      showNotification('Install failed: ' + err.message, 'error');
-                    }
-                  }}
-                >{t('settings.installAndRestart') || 'Install and restart'}</button>
-              )}
-
-            </div>
-          </div>
-
           {/* Numeric Keyboard Toggle */}
           <div className="setting-card">
             <div className="setting-header">
@@ -571,6 +536,48 @@ const Settings = () => {
 
           <div className="setting-card">
             <div className="setting-header">
+              <label className="setting-label">{t('settings.rc') || 'RC'}</label>
+              <p className="setting-description">{t('settings.rcDesc') || 'Optional company registration number (RC).'}</p>
+            </div>
+            <input
+              type="text"
+              className="setting-input"
+              value={localSettings.rc || ''}
+              onChange={e => handleChange('rc', e.target.value)}
+              placeholder={t('settings.rcPlaceholder') || 'Enter RC (optional)'}
+            />
+          </div>
+
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.ai') || 'AI'}</label>
+              <p className="setting-description">{t('settings.aiDesc') || 'Optional tax office code (AI).'}</p>
+            </div>
+            <input
+              type="text"
+              className="setting-input"
+              value={localSettings.ai || ''}
+              onChange={e => handleChange('ai', e.target.value)}
+              placeholder={t('settings.aiPlaceholder') || 'Enter AI (optional)'}
+            />
+          </div>
+
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.nis') || 'NIS'}</label>
+              <p className="setting-description">{t('settings.nisDesc') || 'Optional statistical identifier (NIS).'}</p>
+            </div>
+            <input
+              type="text"
+              className="setting-input"
+              value={localSettings.nis || ''}
+              onChange={e => handleChange('nis', e.target.value)}
+              placeholder={t('settings.nisPlaceholder') || 'Enter NIS (optional)'}
+            />
+          </div>
+
+          <div className="setting-card">
+            <div className="setting-header">
               <label className="setting-label">{t('settings.logo')}</label>
               <p className="setting-description">{t('settings.logoDesc')}</p>
             </div>
@@ -598,6 +605,60 @@ const Settings = () => {
               </div>
             )}
           </div>
+
+          {/* Receipt printer selection */}
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.receiptPrinter') || 'Receipt printer'}</label>
+              <p className="setting-description">{t('settings.receiptPrinterDesc') || 'Select default printer for receipts (leave empty to use system default).'} </p>
+            </div>
+
+            <select
+              className="setting-input"
+              value={localSettings.receiptPrinter || ''}
+              onChange={(e) => handleChange('receiptPrinter', e.target.value || null)}
+            >
+              <option value="">{t('settings.useSystemDefault') || 'Use system default'}</option>
+              {availablePrinters.map(p => (
+                <option key={p.name} value={p.name}>{p.name}{p.isDefault ? ' — default' : ''}</option>
+              ))}
+            </select>
+
+            <div style={{ marginTop: 10, display: 'flex', alignItems: 'center' }}>
+              <label className="toggle-switch" style={{ marginRight: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={!!localSettings.printDialogOnPrint}
+                  onChange={(e) => handleChange('printDialogOnPrint', e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <span>{t('settings.printDialog') || 'Show system print dialog'}</span>
+            </div>
+          </div>
+
+          {/* Barcode printer (dedicated) */}
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.barcodePrinter') || 'Barcode printer'}</label>
+              <p className="setting-description">{t('settings.barcodePrinterDesc') || 'Select default printer for product barcode labels.'}</p>
+            </div>
+
+            <select
+              className="setting-input"
+              value={localSettings.barcodePrinter || ''}
+              onChange={(e) => handleChange('barcodePrinter', e.target.value || null)}
+            >
+              <option value="">{t('settings.useSystemDefault') || 'Use system default'}</option>
+              {availablePrinters.map(p => (
+                <option key={p.name} value={p.name}>{p.name}{p.isDefault ? ' — default' : ''}</option>
+              ))}
+            </select>
+
+            <div style={{ marginTop: 8, color: 'var(--text-secondary)', fontSize: 12 }}>
+              {t('settings.barcodePrinterNote') || 'If a barcode printer is selected, barcode labels will print there by default.'}
+            </div>
+          </div>
           {/* Product Categories Section (moved here) */}
         <div className="settings-section">
           <h2 className="section-title">
@@ -612,11 +673,13 @@ const Settings = () => {
             <div className="category-input-wrapper" style={{display:'flex',flexWrap:'wrap',gap:'8px',padding:'6px',border:'1px solid #ccc',borderRadius:'6px',background:'transparent'}}>
               {(Array.isArray(localSettings.categories) ? localSettings.categories : (localSettings.categories ? localSettings.categories.split(',').map(c=>c.trim()).filter(Boolean) : [])).map((cat, idx) => (
                 <span key={idx} style={{background:'#ff9800',color:'#fff',borderRadius:'16px',padding:'4px 12px',display:'flex',alignItems:'center',margin:'2px', fontSize:'0.85em'}}>
-                  {cat}
-                  <button type="button" style={{marginLeft:'6px',background:'none',border:'none',color:'#fff',fontWeight:'bold',cursor:'pointer', fontSize:'1em'}} onClick={() => {
-                    const cats = Array.isArray(localSettings.categories) ? localSettings.categories : (localSettings.categories ? localSettings.categories.split(',').map(c=>c.trim()).filter(Boolean) : []);
-                    setLocalSettings({ ...localSettings, categories: cats.filter((_, i) => i !== idx) });
-                  }}>×</button>
+                  {String(cat).toLowerCase() === 'miscellaneous' ? t('settings.products_category_miscellaneous', 'Miscellaneous') : cat}
+                  {String(cat).toLowerCase() !== 'miscellaneous' && (
+                    <button type="button" style={{marginLeft:'6px',background:'none',border:'none',color:'#fff',fontWeight:'bold',cursor:'pointer', fontSize:'1em'}} onClick={() => {
+                      const cats = Array.isArray(localSettings.categories) ? localSettings.categories : (localSettings.categories ? localSettings.categories.split(',').map(c=>c.trim()).filter(Boolean) : []);
+                      setLocalSettings({ ...localSettings, categories: cats.filter((_, i) => i !== idx) });
+                    }}>×</button>
+                  )}
                 </span>
               ))}
               <input
@@ -870,6 +933,129 @@ const Settings = () => {
             </div>
           </div>
         )}
+
+        {/* Software Updates */}
+        <div className="settings-section">
+          <h2 className="section-title">
+            <span className="section-icon">🔄</span>
+            {t('settings.softwareUpdatesTitle')}
+          </h2>
+
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.appVersionLabel')}</label>
+              <p className="setting-description">{t('settings.appVersionDesc')}</p>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div><code>{appVersion || '—'}</code></div>
+              <div>
+                <button className="save-settings-btn" onClick={async () => {
+                  if (!ipcRenderer) {
+                    showNotification(t('update.desktopOnly'), 'info');
+                    return;
+                  }
+                  setIsCheckingUpdate(true);
+                  try {
+                    await ipcRenderer.invoke('check-for-updates');
+                    // update UI handled by UpdateNotification component
+                  } catch (err) {
+                    showNotification(t('update.checkFailed', { error: err && err.message ? err.message : err }), 'error');
+                  } finally {
+                    setTimeout(() => setIsCheckingUpdate(false), 1200);
+                  }
+                }} disabled={isCheckingUpdate}>
+                  {isCheckingUpdate ? t('settings.checking') : t('settings.checkForUpdates')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* License & Trial Section */}
+        <div className="settings-section">
+          <h2 className="section-title">
+            <span className="section-icon">🔐</span>
+            {t('settings.licenseSectionTitle')}
+          </h2>
+
+          <div className="setting-card">
+            <div className="setting-header">
+              <label className="setting-label">{t('settings.licenseStatusLabel')}</label>
+              <p className="setting-description">{t('settings.licenseStatusDesc')}</p>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+              {licenseInfo && licenseInfo.expiry && new Date(licenseInfo.expiry) > new Date() ? (
+                (() => {
+                  const expiryDate = new Date(licenseInfo.expiry);
+                  const isUnlimited = expiryDate > new Date('2099-01-01');
+                  const daysLeft = Math.max(0, Math.ceil((expiryDate - new Date()) / (1000*60*60*24)));
+                  return (
+                    <>
+                      <div style={{ fontWeight: 700, color: '#2d6a4f' }}>
+                        🟢 {isUnlimited ? t('settings.licenseActiveUnlimited') : t('settings.licenseActive', { days: daysLeft })}
+                      </div>
+
+                      {!isUnlimited && (
+                        <div style={{ color: '#666' }}>{t('settings.licenseExpires', { date: expiryDate.toLocaleDateString() })}</div>
+                      )}
+
+                      <div>
+                        <button className="save-settings-btn" onClick={() => setShowLicenseModal(true)}>🔑 {t('settings.openActivationPage')}</button>
+                      </div>
+                    </>
+                  );
+                })()
+              ) : (
+                <>
+                  <div style={{ fontWeight: 700, color: '#b03' }}>
+                    ⚠️ {t('settings.trialExpired')}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="save-settings-btn" onClick={() => setShowLicenseModal(true)}>🔑 {t('settings.activateEnterLicense')}</button>
+                    <button className="reset-settings-btn" onClick={async () => {
+                      if (!ipcRenderer) {
+                        // Browser fallback
+                        const expireAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+                        const act = { license_key: 'TRIAL-LOCAL', machine_id: licenseUtil.getMachineId(), expiry: expireAt, last_run: new Date(), trial: true };
+                        licenseUtil.storeActivation(act);
+                        setLicenseInfo(act);
+                        window.dispatchEvent(new CustomEvent('license-updated', { detail: act }));
+                        showNotification(t('settings.trialStarted', { days: 7 }), 'success');
+                        return;
+                      }
+
+                      try {
+                        setLicenseActionLoading(true);
+                        const res = await ipcRenderer.invoke('start-trial', 7);
+                        setLicenseActionLoading(false);
+                        if (res && res.success) {
+                          const act = { license_key: res.license_key, machine_id: licenseUtil.getMachineId(), expiry: res.expire_at, last_run: new Date(), trial: true };
+                          licenseUtil.storeActivation(act);
+                          setLicenseInfo(act);
+                          window.dispatchEvent(new CustomEvent('license-updated', { detail: act }));
+                          showNotification(t('settings.trialStarted', { days: 7 }), 'success');
+                        } else {
+                          showNotification('Could not start trial: ' + (res && res.error ? res.error : 'Unknown'), 'error');
+                        }
+                      } catch (err) {
+                        setLicenseActionLoading(false);
+                        showNotification('Error starting trial: ' + (err && err.message ? err.message : err), 'error');
+                      }
+                    }} disabled={licenseActionLoading}>
+                      {t('settings.startTrial')}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div style={{ marginTop: 12, color: '#777', fontSize: '0.9rem' }}>
+              {t('settings.trialExpiryNote') }
+            </div>
+          </div>
+        </div>
   
         {/* Action Buttons */}
         <div className="settings-actions">
@@ -883,6 +1069,19 @@ const Settings = () => {
             🔄 {t('settings.resetToDefaults')}
           </button>
         </div>
+
+        {/* Render License modal from Settings when requested */}
+        {showLicenseModal && (
+          <License forceOpen={true} onActivated={() => {
+            // Refresh local license info and close modal
+            (async () => {
+              const act = await licenseUtil.loadActivation(licenseUtil.getMachineId());
+              setLicenseInfo(act);
+              window.dispatchEvent(new CustomEvent('license-updated', { detail: act }));
+            })();
+            setShowLicenseModal(false);
+          }} onClose={() => setShowLicenseModal(false)} />
+        )}
       </div>
 
       {/* Reset Confirmation Modal */}

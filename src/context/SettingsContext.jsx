@@ -20,7 +20,7 @@ const defaultSettings = {
   shopAddress: '',
   taxId: '',
   currency: 'USD',
-  categories: [], // Default empty, can be set in setup/settings
+  categories: ['miscellaneous'], // Default includes invariant 'miscellaneous' category (localized in UI)
   enableNumericKeyboard: false // Default disabled
 };
 
@@ -40,7 +40,20 @@ export const currencies = [
 export const SettingsProvider = ({ children }) => {
   const [settings, setSettings] = useState(() => {
     const saved = localStorage.getItem('posSettings');
-    return saved ? JSON.parse(saved) : defaultSettings;
+    const initial = saved ? JSON.parse(saved) : defaultSettings;
+
+    // Ensure 'miscellaneous' category is always present (invariant stored key)
+    initial.categories = Array.isArray(initial.categories)
+      ? Array.from(new Set(['miscellaneous', ...initial.categories]))
+      : ['miscellaneous'];
+
+    // Ensure new keys have safe defaults
+    return {
+      receiptPrinter: initial.receiptPrinter || null,
+      barcodePrinter: initial.barcodePrinter || null,
+      printDialogOnPrint: initial.printDialogOnPrint || false,
+      ...initial
+    };
   });
 
   // Apply theme and colors immediately on mount

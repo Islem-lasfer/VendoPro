@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useSettings } from '../../context/SettingsContext';
@@ -46,6 +46,7 @@ ChartJS.register(
 );
 
 const SupplierInvoices = () => {
+  const productNameRefs = useRef([]); // refs for product name inputs (prevent scanner Enter from submitting)
   const { t } = useTranslation();
   const { settings } = useSettings();
   const navigate = useNavigate();
@@ -93,10 +94,15 @@ const SupplierInvoices = () => {
   const [showModal, setShowModal] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  // Filters
+  const [filterFrom, setFilterFrom] = useState('');
+  const [filterTo, setFilterTo] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [notification, setNotification] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [formData, setFormData] = useState({
     supplierName: '',
+    supplierPhone: '',
     invoiceDate: new Date().toISOString().split('T')[0],
     items: [{ productName: '', quantity: 0, quantityType: 'unit', purchasePrice: 0, barcode: '', existingProduct: null }],
     autoUpdateQuantity: true,
@@ -234,6 +240,7 @@ const SupplierInvoices = () => {
     const invoiceData = {
       invoiceNumber: `SUP-${Date.now()}`,
       supplierName: formData.supplierName,
+      supplierPhone: formData.supplierPhone || '',
       date: formData.invoiceDate,
       total: total,
       paid: paidAmount,
@@ -349,10 +356,33 @@ const SupplierInvoices = () => {
     });
   };
 
-  const filteredInvoices = invoices.filter(inv =>
-    inv.supplierName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    inv.invoiceNumber.toString().includes(searchTerm)
-  ).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const filteredInvoices = invoices.filter(inv => {
+    const q = (searchTerm || '').trim().toLowerCase();
+    const matchesSearch = !q || (inv.supplierName && inv.supplierName.toLowerCase().includes(q)) || String(inv.invoiceNumber).includes(searchTerm);
+
+    // Status filter
+    const debt = getInvoiceDebt(inv);
+    let matchesStatus = true;
+    if (statusFilter === 'paid') {
+      matchesStatus = (inv.status === 'paid') || (debt === 0);
+    } else if (statusFilter === 'unpaid') {
+      matchesStatus = (inv.status !== 'paid') && debt > 0;
+    }
+
+    // Date range filter (inclusive)
+    let matchesDate = true;
+    const invDate = inv.date ? new Date(inv.date) : null;
+    if (filterFrom) {
+      const from = new Date(filterFrom + 'T00:00:00');
+      matchesDate = invDate && invDate >= from;
+    }
+    if (matchesDate && filterTo) {
+      const to = new Date(filterTo + 'T23:59:59');
+      matchesDate = invDate && invDate <= to;
+    }
+
+    return matchesSearch && matchesStatus && matchesDate;
+  }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {
@@ -374,7 +404,7 @@ const SupplierInvoices = () => {
   };
 
   // Helper: reliably compute debt for an invoice (normalizes values)
-  const getInvoiceDebt = (inv) => {
+  function getInvoiceDebt(inv) {
     const total = normalizeNumber(inv.total);
     const paid = normalizeNumber(inv.paid);
     const debtFromField = typeof inv.debt !== 'undefined' ? normalizeNumber(inv.debt) : null;
@@ -382,7 +412,7 @@ const SupplierInvoices = () => {
     // Treat very small values as zero to avoid showing 0.00 due to rounding issues
     if (Math.abs(debt) < 0.005) debt = 0;
     return Math.max(0, +debt.toFixed(2));
-  };
+  }
 
   // Export single invoice to Excel
   const exportInvoiceToExcel = (invoice) => {
@@ -558,7 +588,7 @@ const SupplierInvoices = () => {
           </div>
       </div>
 
-      {/* Search Bar */}
+      {/* Search Bar + Filters */}
       <div className="search-bar">
           <input
             type="text"
@@ -568,6 +598,34 @@ const SupplierInvoices = () => {
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         <span className="search-icon">🔍</span>
+
+        <div className="filters-row">
+          <div className="filter-item">
+            <label className="filter-label">{t('supplier.filterStatus') || t('supplier.status')}</label>
+            <select className="filter-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="all">{t('supplier.filterAll') || 'All'}</option>
+              <option value="paid">{t('supplier.paid') || 'Paid'}</option>
+              <option value="unpaid">{t('supplier.filterUnpaid') || t('supplier.pending') || 'Unpaid'}</option>
+            </select>
+          </div>
+
+          <div className="filter-item">
+            <label className="filter-label">{t('supplier.from') || t('invoiceHistory.from') || 'From'}</label>
+            <input type="date" className="filter-date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} />
+          </div>
+
+          <div className="filter-item">
+            <label className="filter-label">{t('supplier.to') || t('invoiceHistory.to') || 'To'}</label>
+            <input type="date" className="filter-date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} />
+          </div>
+
+          <div className="filter-item">
+            <label className="filter-label"><br/></label>
+            <button type="button" className="clear-filters-btn" onClick={() => { setStatusFilter('all'); setFilterFrom(''); setFilterTo(''); }}>
+              {t('supplier.clearFilters') || 'Clear filters'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Statistics Summary */}
@@ -665,6 +723,9 @@ const SupplierInvoices = () => {
                 <div>
                   <h4>#{invoice.id}</h4>
                   <p className="supplier-name">{invoice.supplierName}</p>
+                  {invoice.supplierPhone && (
+                    <p className="supplier-phone">📞 {invoice.supplierPhone}</p>
+                  )}
                   <span className={`invoice-status ${isPaid ? 'paid' : 'pending'}`}>
                     {isPaid ? '✓ ' + (t('supplier.paid') || 'Paid') : '⚠ ' + (t('supplier.pending') || 'Pending')}
                   </span>
@@ -741,6 +802,15 @@ const SupplierInvoices = () => {
                   />
                 </div>
                 <div className="form-group">
+                  <label>{t('phone') || 'Phone'}:</label>
+                  <input
+                    type="text"
+                    value={formData.supplierPhone}
+                    onChange={(e) => setFormData({ ...formData, supplierPhone: e.target.value })}
+                    placeholder={t('enterPhone') || 'Enter phone number'}
+                  />
+                </div>
+                <div className="form-group">
                     <label>{t('supplier.invoiceDate')}:</label>
                   <input
                     type="date"
@@ -760,9 +830,17 @@ const SupplierInvoices = () => {
                       placeholder={t('supplier.barcode')}
                       value={item.barcode}
                       onChange={(e) => updateItem(index, 'barcode', e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          // Prevent barcode scanner's trailing Enter from submitting the invoice form
+                          e.preventDefault();
+                          productNameRefs.current[index]?.focus();
+                        }
+                      }}
                       className="barcode-input"
                     />
                     <input
+                      ref={el => productNameRefs.current[index] = el}
                       type="text"
                       placeholder={t('supplier.productName')}
                       value={item.productName}
@@ -927,6 +1005,12 @@ const SupplierInvoices = () => {
                   <span>{t('supplier.supplier')}:</span>
                 <strong>{selectedInvoice.supplierName}</strong>
               </div>
+              {selectedInvoice.supplierPhone && (
+                <div className="detail-row">
+                    <span>{t('phone') || 'Phone'}:</span>
+                  <strong>{selectedInvoice.supplierPhone}</strong>
+                </div>
+              )}
               <div className="detail-row">
                   <span>{t('supplier.date')}:</span>
                 <strong>{formatDate(selectedInvoice.date)}</strong>

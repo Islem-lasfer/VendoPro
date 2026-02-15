@@ -11,7 +11,6 @@ import './InvoiceHistory.css';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { generateBarcodeDataUrl } from '../../utils/barcode';
-import { renderDocHeader, renderInvoiceTemplate } from '../../utils/pdfTemplates/invoiceTemplate';
 
 // Conditionally import ipcRenderer for Electron environment
 let ipcRenderer = null;
@@ -318,7 +317,26 @@ ChartJS.register(
           };
         }
         
-        // Standardized header
+        doc.setFillColor(...beige);
+        doc.rect(0, 0, 210, 38, 'F');
+        let logo = settings.posLogo || invoice.companyLogo || invoice.logo;
+        if (logo) {
+          try {
+            let width = 22;
+            let height = 22;
+            if (logo.startsWith('data:image')) {
+              const img = document.createElement('img');
+              img.src = logo;
+              if (img.complete && img.naturalWidth && img.naturalHeight) {
+                width = height * (img.naturalWidth / img.naturalHeight);
+              }
+            }
+            doc.addImage(logo, 'PNG', 10, 7, width, height, undefined, 'FAST');
+          } catch (e) {}
+        }
+        doc.setFontSize(10);
+        doc.setTextColor(...noir);
+        // Format date as DD-MM-YYYY
         const formatDate = (dateStr) => {
           if (!dateStr) return '';
           if (dateStr.includes('-')) {
@@ -335,16 +353,20 @@ ChartJS.register(
         else if (docType === 'proforma') title = t('SalesByInvoices.proforma');
         else if (docType === 'garantie') title = t('SalesByInvoices.garantie');
         else title = t('SalesByInvoices.document');
-
-        renderDocHeader(doc, {
-          title,
-          docNumber: invoice.invoiceNumber || invoice.number || '',
-          date: formatDate(invoice.date),
-          company: invoice,
-          logo: settings.posLogo || invoice.companyLogo || invoice.logo,
-          isRTL,
-          t
-        });
+        let titleFontSize = 28;
+        const maxTitleWidth = 80;
+        doc.setFontSize(titleFontSize);
+        setPdfFont(doc, 'bold');
+        let titleWidth = doc.getTextWidth(title.toUpperCase());
+        while (titleWidth > maxTitleWidth && titleFontSize > 12) {
+          titleFontSize -= 2;
+          doc.setFontSize(titleFontSize);
+          titleWidth = doc.getTextWidth(title.toUpperCase());
+        }
+        doc.text(title.toUpperCase(), 120, 20, { align: isRTL ? 'right' : 'left' });
+        doc.setFontSize(9);
+        setPdfFont(doc, 'normal');
+        doc.text(`${t('SalesByInvoices.documentNo')}: ${invoice.invoiceNumber || invoice.number || ''}`, 120, 28, { align: isRTL ? 'right' : 'left' });
 
         // Info: shop and client in bold with text wrapping
         doc.setFontSize(11);
@@ -441,43 +463,74 @@ ChartJS.register(
         const tax = invoice.tax || 0;
         const total = invoice.total || 0;
         if (docType === 'devis') {
-          renderInvoiceTemplate(doc, {
-            items,
-            company: invoice,
-            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
-            title,
-            docNumber: invoice.invoiceNumber || invoice.number || '',
-            date: formatDate(invoice.date),
-            totals: { subtotal, discount, tax, total },
-            currency,
-            t,
-            isRTL,
-            showPrices: true
+          autoTable(doc, {
+            startY: tableStartY,
+            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+            body: items.map(item => [
+              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
+              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
+              `${item.price} ${currency}`,
+              `${(item.price * item.quantity).toFixed(2)} ${currency}`
+            ]),
+            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+            bodyStyles: { halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+              1: { cellWidth: 30 },
+              2: { cellWidth: 35 },
+              3: { cellWidth: 35 }
+            },
+            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(invoice.date)}`, 15, finalY + 8);
-          doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 16);
-          doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 24);
+          doc.setFontSize(10);
+          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
+          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
+          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
+          setPdfFont(doc, 'bold');
+          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
+          setPdfFont(doc, 'normal');
+          if (invoice.debt && invoice.debt > 0) {
+            doc.setTextColor(210, 51, 108);
+            doc.text(`${t('checkout.remainingDebt') || 'Remaining Debt'} : ${invoice.debt.toFixed(2)} ${currency}`, 140, finalY + 36);
+            doc.setTextColor(0, 0, 0);
+          }
+          doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(invoice.date)}`, 15, finalY + 32);
+          doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 40);
+          doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 48);
         } else if (docType === 'bon_commande') {
-          renderInvoiceTemplate(doc, {
-            items,
-            company: invoice,
-            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
-            title,
-            docNumber: invoice.invoiceNumber || invoice.number || '',
-            date: formatDate(invoice.date),
-            totals: { subtotal, discount, tax, total },
-            currency,
-            t,
-            isRTL,
-            showPrices: true
+          autoTable(doc, {
+            startY: tableStartY,
+            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+            body: items.map(item => [
+              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
+              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
+              `${item.price} ${currency}`,
+              `${(item.price * item.quantity).toFixed(2)} ${currency}`
+            ]),
+            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+            bodyStyles: { halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+              1: { cellWidth: 30 },
+              2: { cellWidth: 35 },
+              3: { cellWidth: 35 }
+            },
+            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          if (invoice.linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + invoice.linkedQuotation, 15, finalY + 8);
-          doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(invoice.date)}`, 15, finalY + 16);
-          doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 24);
-          doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 32);
-          doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 40);
+          doc.setFontSize(10);
+          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
+          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
+          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
+          setPdfFont(doc, 'bold');
+          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
+          setPdfFont(doc, 'normal');
+          if (invoice.linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + invoice.linkedQuotation, 15, finalY + 32);
+          doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(invoice.date)}`, 15, finalY + 40);
+          doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 48);
+          doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 56);
+          doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 64);
         } else if (docType === 'bon_livraison') {
           autoTable(doc, {
             startY: tableStartY,
@@ -502,39 +555,68 @@ ChartJS.register(
           doc.rect(15, finalY + 28, 60, 25);
           doc.text(t('SalesByInvoices.deliveryNoteInfo'), 15, finalY + 60);
         } else if (docType === 'facture') {
-          renderInvoiceTemplate(doc, {
-            items,
-            company: invoice,
-            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
-            title,
-            docNumber: invoice.invoiceNumber || invoice.number || '',
-            date: formatDate(invoice.date),
-            totals: { subtotal, discount, tax, total },
-            currency,
-            t,
-            isRTL,
-            showPrices: true,
-            paymentInfo: { paymentMethod: invoice.paymentMethod, dueDate: formatDate(invoice.date), paymentStatus: (settings.paymentStatusOptions && settings.paymentStatusOptions.find(opt => opt.value === invoice.paymentStatus)?.label) || invoice.paymentStatus }
+          autoTable(doc, {
+            startY: tableStartY,
+            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+            body: items.map(item => [
+              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
+              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
+              `${item.price} ${currency}`,
+              `${(item.price * item.quantity).toFixed(2)} ${currency}`
+            ]),
+            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+            bodyStyles: { halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+              1: { cellWidth: 30 },
+              2: { cellWidth: 35 },
+              3: { cellWidth: 35 }
+            },
+            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          if (invoice.linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + invoice.linkedDelivery, 15, finalY + 8);
-          doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 16);
+          doc.setFontSize(10);
+          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
+          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
+          doc.text(`${t('invoiceHistory.tax')} (${settings.taxRate || 0}%) : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
+          setPdfFont(doc, 'bold');
+          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
+          setPdfFont(doc, 'normal');
+          if (invoice.linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + invoice.linkedDelivery, 15, finalY + 32);
+          doc.text(`${t('SalesByInvoices.paymentMethod')} : ${invoice.paymentMethod || ''}`, 15, finalY + 40);
+          doc.text(`${t('SalesByInvoices.dueDate')} : ${formatDate(invoice.date)}`, 15, finalY + 48);
+          let statusLabel = (settings.paymentStatusOptions && settings.paymentStatusOptions.find(opt => opt.value === invoice.paymentStatus)?.label) || invoice.paymentStatus;
+          doc.text(`${t('SalesByInvoices.paymentStatus')} : ${statusLabel}`, 15, finalY + 56);
+          doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 64);
         } else if (docType === 'proforma') {
-          renderInvoiceTemplate(doc, {
-            items,
-            company: invoice,
-            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
-            title,
-            docNumber: invoice.invoiceNumber || invoice.number || '',
-            date: formatDate(invoice.date),
-            totals: { subtotal, discount, tax, total },
-            currency,
-            t,
-            isRTL,
-            showPrices: true
+          autoTable(doc, {
+            startY: tableStartY,
+            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+            body: items.map(item => [
+              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
+              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
+              `${item.price} ${currency}`,
+              `${(item.price * item.quantity).toFixed(2)} ${currency}`
+            ]),
+            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+            bodyStyles: { halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+              1: { cellWidth: 30 },
+              2: { cellWidth: 35 },
+              3: { cellWidth: 35 }
+            },
+            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 8);
+          doc.setFontSize(10);
+          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
+          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
+          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
+          setPdfFont(doc, 'bold');
+          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
+          setPdfFont(doc, 'normal');
+          doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 42);
         } else if (docType === 'garantie') {
           doc.setFontSize(12);
           doc.text(t('SalesByInvoices.productInformation'), 15, tableStartY);

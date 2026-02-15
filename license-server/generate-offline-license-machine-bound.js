@@ -95,8 +95,13 @@ function generateOfflineLicense(validityMonths = 12, machineId = null) {
   };
   
   // Add machine binding if specified
+  function normalizeId(id) {
+    if (!id) return null;
+    return id.toString().replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  }
+
   if (machineId) {
-    payload.machine_id = machineId.toUpperCase().replace(/:/g, '');
+    payload.machine_id = normalizeId(machineId);
     log(`\n🔒 Machine Binding: ${payload.machine_id}`, colors.yellow);
     log(`   This license will ONLY work on this specific machine`, colors.yellow);
   } else {

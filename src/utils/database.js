@@ -215,6 +215,34 @@ export const getProductLocations = async (productId) => {
   }
 };
 
+export const getLocationTransfers = async (productId) => {
+  try {
+    if (await isNetworkMode()) {
+      const data = await dbAPI.getLocationTransfers(productId);
+      return handleResponse(data);
+    } else {
+      if (!ipcRenderer) return { success: false, error: 'IPC not available' };
+      return await ipcRenderer.invoke('db:getLocationTransfers', productId);
+    }
+  } catch (error) {
+    return handleError(error);
+  }
+};
+
+export const deleteLocationTransfer = async (transferId) => {
+  try {
+    if (await isNetworkMode()) {
+      const data = await dbAPI.deleteLocationTransfer(transferId);
+      return handleResponse(data);
+    } else {
+      if (!ipcRenderer) return { success: false, error: 'IPC not available' };
+      return await ipcRenderer.invoke('db:deleteLocationTransfer', transferId);
+    }
+  } catch (error) {
+    return handleError(error);
+  }
+};
+
 // ============= LOCATIONS =============
 
 export const getAllLocations = async () => {
@@ -411,13 +439,30 @@ export const getInvoiceById = async (id) => {
 };
 
 export const createInvoice = async (invoice) => {
+  // Normalize date-only values (YYYY-MM-DD) to full ISO timestamps including current time.
+  // This prevents storing date-only strings that parse as UTC midnight and display as 01:00 AM in some timezones.
+  const normalizeInvoiceDate = (inv) => {
+    if (!inv || !inv.date) return inv;
+    const d = inv.date;
+    // If the date is YYYY-MM-DD (no time), append current local time and convert to ISO
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const localDateTime = `${d}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      return { ...inv, date: new Date(localDateTime).toISOString() };
+    }
+    return inv;
+  };
+
+  const normalizedInvoice = normalizeInvoiceDate(invoice);
+
   try {
     if (await isNetworkMode()) {
-      const data = await dbAPI.createInvoice(invoice);
+      const data = await dbAPI.createInvoice(normalizedInvoice);
       return handleResponse(data);
     } else {
       if (!ipcRenderer) return { success: false, error: 'IPC not available' };
-      const localRes = await ipcRenderer.invoke('db:createInvoice', invoice);
+      const localRes = await ipcRenderer.invoke('db:createInvoice', normalizedInvoice);
       try { if (localRes && localRes.id) syncQueue.pushOperation({ type: 'createInvoice', payload: localRes }); } catch(e){ console.warn('Failed to queue createInvoice', e); }
       return localRes;
     }

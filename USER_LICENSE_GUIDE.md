@@ -16,7 +16,7 @@ license-ABC12-DEF34-GHI56-JKL78-MNO90.lic
 ### Step 2: Launch the POS Application
 
 1. Double-click the POS application icon
-2. You will see the license activation screen:
+2. You will see the license activation screen: (a code labeled "Disk ID" is shown — copy it and "Send to deployer" so your vendor can generate a .lic bound to your machine). You can also enter your name, email and phone and click "Send to deployer" to send these details to pos.sales.system@gmail.com (automatic when online). If you are offline, the app shows vendor contact info: pos.sales.system@gmail.com and +213 782073213 so you can contact them manually.
 
 ```
 ╔════════════════════════════════════════════╗

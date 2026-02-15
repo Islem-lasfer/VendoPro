@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS products (
   purchasePrice DECIMAL(10, 2),
   image TEXT,
   serialNumber VARCHAR(255),
+  `reference` VARCHAR(255),
   incomplete TINYINT DEFAULT 0,
   addedFrom VARCHAR(255),
   createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -55,6 +56,23 @@ CREATE TABLE IF NOT EXISTS product_locations (
   UNIQUE KEY unique_product_location (productId, locationId),
   INDEX idx_productId (productId),
   INDEX idx_locationId (locationId)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table des transferts d'emplacement (location_transfers)
+CREATE TABLE IF NOT EXISTS location_transfers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  productId INT NOT NULL,
+  fromLocationId INT,
+  toLocationId INT,
+  quantity INT NOT NULL,
+  reason TEXT,
+  date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (productId) REFERENCES products(id) ON DELETE CASCADE,
+  FOREIGN KEY (fromLocationId) REFERENCES locations(id),
+  FOREIGN KEY (toLocationId) REFERENCES locations(id),
+  INDEX idx_location_transfers_productId (productId),
+  INDEX idx_location_transfers_fromLocationId (fromLocationId),
+  INDEX idx_location_transfers_toLocationId (toLocationId)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Insérer des emplacements par défaut

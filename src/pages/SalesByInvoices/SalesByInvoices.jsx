@@ -38,7 +38,6 @@ import NumericInput from '../../components/NumericInput/NumericInput';
 import '../../pages/Checkout/Checkout.css';
 import 'jspdf-autotable';
 import { generateBarcodeDataUrl } from '../../utils/barcode';
-import { renderDocHeader, renderInvoiceTemplate } from '../../utils/pdfTemplates/invoiceTemplate';
 
 const { ipcRenderer } = window.require ? window.require('electron') : { ipcRenderer: null };
 
@@ -916,13 +915,44 @@ const SalesByInvoices = () => {
       };
     }
     
-    // Standardized header (logo / title / number / date)
+    const noir = [0, 0, 0];
+    const beige = [245, 240, 230];
+    // Header: left logo/date, right title/number, then line
+    doc.setFillColor(...beige);
+    doc.rect(0, 0, 210, 38, 'F');
+    let logo = settings.posLogo || formData.logo;
+    if (logo) {
+      try {
+        // Increased default logo size and preserve aspect ratio
+        let maxDim = 48; // mm
+        let width = maxDim;
+        let height = maxDim;
+        if (logo.startsWith('data:image')) {
+          const img = document.createElement('img');
+          img.src = logo;
+          if (img.complete && img.naturalWidth && img.naturalHeight) {
+            const aspect = img.naturalWidth / img.naturalHeight;
+            if (aspect >= 1) {
+              width = Math.min(maxDim, maxDim);
+              height = Math.round(width / aspect);
+            } else {
+              height = Math.min(maxDim, maxDim);
+              width = Math.round(height * aspect);
+            }
+          }
+        }
+        doc.addImage(logo, 'PNG', 10, 6, width, height, undefined, 'FAST');
+      } catch (e) {}
+    }
+    doc.setFontSize(10);
+    doc.setTextColor(...noir);
+    // Format date as DD-MM-YYYY
     const formatDate = (dateStr) => {
       if (!dateStr) return '';
       const [year, month, day] = dateStr.split('-');
       return `${day}-${month}-${year}`;
     };
-
+    doc.text(`${t('Date')}: ${formatDate(formData.date)}`, 14, 33);
     let title = '';
     if (docType === 'facture') title = t('SalesByInvoices.invoice');
     else if (docType === 'bon_commande') title = t('SalesByInvoices.purchaseOrder');
@@ -931,16 +961,21 @@ const SalesByInvoices = () => {
     else if (docType === 'proforma') title = t('SalesByInvoices.proforma');
     else if (docType === 'garantie') title = t('SalesByInvoices.garantie');
     else title = t('SalesByInvoices.document');
-
-    renderDocHeader(doc, {
-      title,
-      docNumber,
-      date: formatDate(formData.date),
-      company: formData,
-      logo: settings.posLogo || formData.logo,
-      isRTL,
-      t
-    });
+    // Dynamically adjust font size for long titles
+    let titleFontSize = 28;
+    const maxTitleWidth = 80; // mm, max width allowed for title
+    doc.setFontSize(titleFontSize);
+    setPdfFont(doc, 'bold');
+    let titleWidth = doc.getTextWidth(title.toUpperCase());
+    while (titleWidth > maxTitleWidth && titleFontSize > 12) {
+      titleFontSize -= 2;
+      doc.setFontSize(titleFontSize);
+      titleWidth = doc.getTextWidth(title.toUpperCase());
+    }
+    doc.text(title.toUpperCase(), 120, 20, { align: isRTL ? 'right' : 'left' });
+    doc.setFontSize(9);
+    setPdfFont(doc, 'normal');
+    doc.text(`${t('SalesByInvoices.documentNo')}: ${docNumber}`, 120, 28, { align: isRTL ? 'right' : 'left' });
     // Draw line below header
   
 
@@ -1031,45 +1066,89 @@ const SalesByInvoices = () => {
 
     // --- Document Type Specific Sections ---
     if (docType === 'devis') {
-      // Quotation: centralized layout
-      renderInvoiceTemplate(doc, {
-        items: cart,
-        company: formData,
-        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
-        title,
-        docNumber,
-        date: formatDate(formData.date),
-        totals: { subtotal, discount, tax, total },
-        currency: settings.currency || '€',
-        t,
-        isRTL,
-        showPrices: true
+      // Quotation: details, validity, terms
+      autoTable(doc, {
+        startY: tableStartY,
+        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+        body: cart.map(item => {
+          const prod = products.find(p => p.id === item.id);
+          const unit = prod?.quantityType || 'unit';
+          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
+          const priceWithType = `${item.price} ${settings.currency || '€'}`;
+          return [
+            item.name,
+            quantityWithUnit,
+            priceWithType,
+            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
+          ];
+        }),
+        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+        bodyStyles: { halign: 'center' },
+        columnStyles: {
+          0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+          1: { cellWidth: 30 },
+          2: { cellWidth: 35 },
+          3: { cellWidth: 35 }
+        },
+        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles(isRTL) }
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(formData.date)}`, 15, finalY + 8);
-      doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 16);
-      doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 24);
+      doc.setFontSize(10);
+      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
+      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
+      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
+      setPdfFont(doc, 'bold');
+      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
+      setPdfFont(doc, 'normal');
+      // Show remaining debt on the invoice when applicable
+      if (debtAmount && debtAmount > 0) {
+        doc.setTextColor(210, 51, 108);
+        doc.text(`${t('checkout.remainingDebt') || 'Remaining Debt'} : ${debtAmount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 36);
+        doc.setTextColor(0, 0, 0);
+      }
+      doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(formData.date)}`, 15, finalY + 32);
+      doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 40);
+      doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 48);
     } else if (docType === 'bon_commande') {
-      // Purchase Order (centralized layout)
-      renderInvoiceTemplate(doc, {
-        items: cart,
-        company: formData,
-        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
-        title,
-        docNumber,
-        date: formatDate(formData.date),
-        totals: { subtotal, discount, tax, total },
-        currency: settings.currency || '€',
-        t,
-        isRTL,
-        showPrices: true
+      // Purchase Order: details, link to quotation, confirmation
+      autoTable(doc, {
+        startY: tableStartY,
+        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+        body: cart.map(item => {
+          const prod = products.find(p => p.id === item.id);
+          const unit = prod?.quantityType || 'unit';
+          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
+          const priceWithType = `${item.price} ${settings.currency || '€'}`;
+          return [
+            item.name,
+            quantityWithUnit,
+            priceWithType,
+            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
+          ];
+        }),
+        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+        bodyStyles: { halign: 'center' },
+        columnStyles: {
+          0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+          1: { cellWidth: 30 },
+          2: { cellWidth: 35 },
+          3: { cellWidth: 35 }
+        },
+        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles(isRTL) }
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      if (linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + linkedQuotation, 15, finalY + 8);
-      doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(formData.date)}`, 15, finalY + 16);
-      doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 24);
-      doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 32);
-      doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 40);
+      doc.setFontSize(10);
+      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
+      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
+      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
+      setPdfFont(doc, 'bold');
+      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
+      setPdfFont(doc, 'normal');
+      if (linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + linkedQuotation, 15, finalY + 32);
+      doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(formData.date)}`, 15, finalY + 40);
+      doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 48);
+      doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 56);
+      doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 64);
     } else if (docType === 'bon_livraison') {
       // Delivery Note: no prices, link to PO, delivery address, signature
       autoTable(doc, {
@@ -1092,43 +1171,83 @@ const SalesByInvoices = () => {
       doc.rect(15, finalY + 28, 60, 25);
       doc.text(t('SalesByInvoices.deliveryNoteInfo'), 15, finalY + 60);
     } else if (docType === 'facture') {
-      // Invoice: use centralized spreadsheet-style renderer
-      renderInvoiceTemplate(doc, {
-        items: cart,
-        company: formData,
-        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone, rc: formData.clientRC, ai: formData.clientAI, nis: formData.clientNIS },
-        title,
-        docNumber,
-        date: formatDate(formData.date),
-        totals: { subtotal, discount, tax, total },
-        currency: settings.currency || '€',
-        t,
-        isRTL,
-        showPrices: true,
-        paymentInfo: { paymentMethod: selectedPaymentMethod, dueDate: formatDate(formData.date), paymentStatus: formData.paymentStatus }
+      // Invoice: all details, reference, payment, legal info
+      autoTable(doc, {
+        startY: tableStartY,
+        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+        body: cart.map(item => {
+          const prod = products.find(p => p.id === item.id);
+          const unit = prod?.quantityType || 'unit';
+          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
+          const priceWithType = `${item.price} ${settings.currency || '€'}`;
+          return [
+            item.name,
+            quantityWithUnit,
+            priceWithType,
+            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
+          ];
+        }),
+        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+        bodyStyles: { halign: 'center' },
+        columnStyles: {
+          0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+          1: { cellWidth: 30 },
+          2: { cellWidth: 35 },
+          3: { cellWidth: 35 }
+        },
+        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles(isRTL) }
       });
-
-      // linked references / legal note (kept beneath rendered template)
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      if (linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + linkedDelivery, 15, finalY + 8);
-      doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 16);
+      doc.setFontSize(10);
+      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
+      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
+      doc.text(`${t('invoiceHistory.tax')} (${settings.taxRate || 0}%) : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
+      setPdfFont(doc, 'bold');
+      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
+      setPdfFont(doc, 'normal');
+      if (linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + linkedDelivery, 15, finalY + 32);
+      doc.text(`${t('SalesByInvoices.paymentMethod')} : ${selectedPaymentMethod}`, 15, finalY + 40);
+      doc.text(`${t('SalesByInvoices.dueDate')} : ${formatDate(formData.date)}`, 15, finalY + 48);
+      // Fix: define statusLabel before using
+      let statusLabel = (typeof paymentStatusOptions !== 'undefined' && paymentStatusOptions.find(opt => opt.value === formData.paymentStatus)?.label) || formData.paymentStatus;
+      doc.text(`${t('SalesByInvoices.paymentStatus')} : ${statusLabel}`, 15, finalY + 56);
+      doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 64);
     } else if (docType === 'proforma') {
-      // Proforma: centralized template but annotated as proforma
-      renderInvoiceTemplate(doc, {
-        items: cart,
-        company: formData,
-        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
-        title,
-        docNumber,
-        date: formatDate(formData.date),
-        totals: { subtotal, discount, tax, total },
-        currency: settings.currency || '€',
-        t,
-        isRTL,
-        showPrices: true
+      // Proforma Invoice: like invoice, but marked and not for accounting
+      autoTable(doc, {
+        startY: tableStartY,
+        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
+        body: cart.map(item => {
+          const prod = products.find(p => p.id === item.id);
+          const unit = prod?.quantityType || 'unit';
+          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
+          const priceWithType = `${item.price} ${settings.currency || '€'}`;
+          return [
+            item.name,
+            quantityWithUnit,
+            priceWithType,
+            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
+          ];
+        }),
+        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
+        bodyStyles: { halign: 'center' },
+        columnStyles: {
+          0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
+          1: { cellWidth: 30 },
+          2: { cellWidth: 35 },
+          3: { cellWidth: 35 }
+        },
+        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles(isRTL) }
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 8);
+      doc.setFontSize(10);
+      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
+      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
+      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
+      setPdfFont(doc, 'bold');
+      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
+      setPdfFont(doc, 'normal');
+      doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 42);
     } else if (docType === 'garantie') {
       // Garantie: special layout
       doc.setFontSize(12);

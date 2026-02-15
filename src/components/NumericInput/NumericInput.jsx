@@ -48,7 +48,7 @@ const NumericInput = ({
 
   const handleInputClick = (e) => {
     if (isEnabled && !disabled && !readOnly) {
-      e.preventDefault();
+      // allow native focus so typing replaces the selected value; still show the on-screen keyboard
       setKeyboardValue(''); // Start with empty value
       setShowKeyboard(true);
       if (onFocus) onFocus(e);
@@ -100,19 +100,21 @@ const NumericInput = ({
   return (
     <>
       <input
-        type={isEnabled ? "text" : "number"}
+        type="text"
+        inputMode="decimal"
+        pattern="[0-9]*[.,]?[0-9]*"
         value={value}
-        onChange={!isEnabled ? onChange : undefined}
+        onChange={onChange}
         onClick={handleInputClick}
-        onFocus={!isEnabled ? onFocus : undefined}
-        onBlur={!isEnabled ? onBlur : undefined}
+        onFocus={onFocus}
+        onBlur={onBlur}
         placeholder={placeholder}
         className={`numeric-input ${className}`}
         min={min}
         max={max}
         step={step}
         disabled={disabled}
-        readOnly={isEnabled ? true : readOnly}
+        readOnly={readOnly}
         id={id}
         name={name}
         style={style}

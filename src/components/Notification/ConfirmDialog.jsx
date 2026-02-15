@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './ConfirmDialog.css';
 
-const ConfirmDialog = ({ message, onConfirm, onCancel, confirmText = 'Confirm', cancelText = 'Cancel' }) => {
+import { useTranslation } from 'react-i18next';
+
+const ConfirmDialog = ({ message, onConfirm, onCancel, confirmText = null, cancelText = null }) => {
+  const { t } = useTranslation();
+  const confirmLabel = confirmText || t('confirm');
+  const cancelLabel = cancelText || t('cancel');
   const [isProcessing, setIsProcessing] = useState(false);
   const confirmButtonRef = useRef(null);
 
@@ -50,7 +55,7 @@ const ConfirmDialog = ({ message, onConfirm, onCancel, confirmText = 'Confirm', 
             onClick={onCancel}
             disabled={isProcessing}
           >
-            {cancelText}
+            {cancelLabel}
           </button>
           <button 
             ref={confirmButtonRef}
@@ -58,7 +63,7 @@ const ConfirmDialog = ({ message, onConfirm, onCancel, confirmText = 'Confirm', 
             onClick={handleConfirm}
             disabled={isProcessing}
           >
-            {isProcessing ? 'Processing...' : confirmText}
+            {isProcessing ? t('processing') || 'Processing...' : confirmLabel}
           </button>
         </div>
       </div>

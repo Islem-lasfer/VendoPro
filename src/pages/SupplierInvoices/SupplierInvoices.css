@@ -89,6 +89,35 @@
   line-height: 1;
 }
 
+/* Filters row under search */
+.filters-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end; /* align controls by their bottom row so single-row buttons line up */
+}
+.filter-item { display:flex; flex-direction:column; gap:6px; }
+.filter-label { font-size:12px; color:var(--text-tertiary); }
+.filter-select, .filter-date {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 2px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  min-width: 140px;
+}
+.clear-filters-btn {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: none;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  color: var(--text-primary);
+  border: 2px solid var(--border-color);
+  align-self: flex-end; /* ensure button sits on the same row as the inputs */
+}
+
 /* Stats Summary */
 .stats-summary {
   display: grid;
@@ -175,6 +204,12 @@
   font-size: 14px;
   color: var(--text-secondary);
   margin: 0;
+}
+
+.supplier-phone {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  margin: 4px 0 0;
 }
 
 .invoice-meta {

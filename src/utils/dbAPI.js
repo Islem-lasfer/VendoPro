@@ -163,6 +163,15 @@ class DatabaseAPI {
     return await this.request(`/locations/${id}`);
   }
 
+  // Location transfers - server API
+  async getLocationTransfers(productId) {
+    return await this.request(`/products/${productId}/transfers`);
+  }
+
+  async deleteLocationTransfer(transferId) {
+    return await this.request(`/products/transfers/${transferId}`, { method: 'DELETE' });
+  }
+
   async deleteInvoice(id) {
     return await this.request(`/invoices/${id}`, {
       method: 'DELETE'

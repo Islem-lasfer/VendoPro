@@ -1,24 +1,6 @@
 
 
-  // Ensure closeModal does not reset quantityType to 'unit' if editing
-  const closeModal = () => {
-    setShowModal(false);
-    setEditingProduct(null);
-    setFormData({ 
-      barcode: '', 
-      name: '', 
-      category: '', 
-      price: '', 
-      detailPrice: '', 
-      wholesalePrice: '', 
-      expirationDate: '', 
-      quantity: '', 
-      quantityType: 'unit', 
-      image: '', 
-      serialNumber: '',
-      locationQuantities: {}
-    });
-  };
+
 import React, { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSettings } from '../../context/SettingsContext';
@@ -80,7 +62,7 @@ const Products = () => {
     setFormData({ 
       barcode: '', 
       name: '', 
-      category: '', 
+      category: 'miscellaneous',
       price: '', 
       detailPrice: '', 
       wholesalePrice: '', 
@@ -103,7 +85,7 @@ const Products = () => {
   const [formData, setFormData] = useState({
     barcode: '',
     name: '',
-    category: '',
+    category: 'miscellaneous',
     price: '',
     detailPrice: '',
     wholesalePrice: '',
@@ -112,12 +94,20 @@ const Products = () => {
     quantityType: 'unit',
     image: '',
     serialNumber: '', // Optional Serial Number
+    reference: '',     // Optional product reference / SKU
     locationQuantities: {} // { locationId: { quantity, localization } }
   });
 
   const { t } = useTranslation();
   const { settings } = useSettings();
   const categories = settings.categories || [];
+
+  // Display label for stored category keys (keep stored key invariant 'miscellaneous')
+  const displayCategory = (cat) => {
+    if (!cat) return '';
+    if (String(cat).toLowerCase() === 'miscellaneous') return t('settings.products_category_miscellaneous', 'Miscellaneous');
+    return cat;
+  };
 
   // Quick "Montant" add (create product with only a price/name when barcode/price missing)
   const [showManualProductModal, setShowManualProductModal] = useState(false);
@@ -178,11 +168,14 @@ const Products = () => {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferData, setTransferData] = useState({
     productId: null,
+    productName: '',
     fromLocationId: '',
     toLocationId: '',
     quantity: '',
     reason: ''
   });
+
+
 
   // Load locations from database
   const loadLocations = async () => {
@@ -290,6 +283,7 @@ const Products = () => {
   const [showQuickUpdateModal, setShowQuickUpdateModal] = useState(false);
   const [quickUpdateData, setQuickUpdateData] = useState({ barcode: '', quantity: '', locationId: '' });
   const quickBarcodeInputRef = useRef(null);
+  const productNameInputRef = useRef(null); // focus target when scanner sends Enter
   // Refs for notification dropdown and bell button to detect outside clicks
   const notifRef = useRef(null);
   const notifBtnRef = useRef(null);
@@ -310,6 +304,11 @@ const Products = () => {
   const [showStats, setShowStats] = useState(false);
   const [chartKey, setChartKey] = useState(0);
   const [expandedProductLocations, setExpandedProductLocations] = useState({});
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30); // default page size (user chose 30)
+
 
   const showNotification = (message, type = 'info') => {
     setNotification({ message, type });
@@ -392,12 +391,28 @@ const Products = () => {
   
   // Then apply search filter
   if (searchTerm) {
+    const q = searchTerm.toLowerCase();
     filteredProducts = filteredProducts.filter(product =>
-      product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      product.barcode.includes(searchTerm) ||
-      product.category.toLowerCase().includes(searchTerm.toLowerCase())
+      (product.name && product.name.toLowerCase().includes(q)) ||
+      (product.barcode && String(product.barcode).includes(searchTerm)) ||
+      (product.category && product.category.toLowerCase().includes(q)) ||
+      (product.reference && product.reference.toLowerCase().includes(q))
     );
   }
+
+  // Reset page when search or filter toggles (do NOT call setState during render)
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, showIncompleteOnly]);
+
+  // Pagination: compute pages and slice the filtered list for display
+  const totalItems = filteredProducts.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const startIndex = (safePage - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
+  const paginatedProducts = filteredProducts.slice(startIndex, endIndex);
+
 
   // Conversion factors for supported units
   const unitConversion = {
@@ -465,7 +480,7 @@ const Products = () => {
     setFormData({
       barcode: product.barcode || '',
       name: product.name || '',
-      category: product.category || '',
+      category: product.category || 'miscellaneous',
       price: product.price || '',
       detailPrice: product.detailPrice || '',
       wholesalePrice: product.wholesalePrice || '',
@@ -474,6 +489,7 @@ const Products = () => {
       quantityType: product.quantityType ? String(product.quantityType) : 'unit',
       image: product.image || '',
       serialNumber: product.serialNumber || '',
+      reference: product.reference || '',
       locationQuantities: locationQty
     });
     setShowModal(true);
@@ -489,7 +505,7 @@ const Products = () => {
     setFormData({ 
       barcode: '', 
       name: '', 
-      category: '', 
+      category: 'miscellaneous', 
       price: '', 
       detailPrice: '', 
       wholesalePrice: '', 
@@ -518,6 +534,7 @@ const Products = () => {
       purchasePrice: formData.purchasePrice ? parseFloat(formData.purchasePrice) : null,
       image: formData.image || null,
       serialNumber: formData.serialNumber || null,
+      reference: formData.reference || null,
       incomplete: 0,
       locationQuantities: formData.locationQuantities || {} 
 };
@@ -568,7 +585,7 @@ const Products = () => {
         }
         await loadProducts();
         closeModal();
-        showNotification('Product created successfully', 'success');
+        showNotification(t('products.productCreatedSuccess'), 'success');
       } else {
         showNotification('Failed to create product: ' + result.error, 'error');
       }
@@ -577,21 +594,31 @@ const Products = () => {
 
   const handleDeleteProduct = async (id) => {
     setConfirmDialog({
-      message: 'Are you sure you want to delete this product?',
+      message: t('products.confirmDelete'),
       onConfirm: async () => {
+        // Optimistic UI: remove immediately for snappy feedback
+        setProducts(prev => prev.filter(p => String(p.id) !== String(id)));
         try {
           const result = await deleteProduct(id);
-          if (result.success) {
+          if (result && result.success) {
+            // ensure freshest state from DB
             await loadProducts();
             setConfirmDialog(null);
-            showNotification('Product deleted successfully', 'success');
+            showNotification(t('products.productDeletedSuccess'), 'success');
           } else {
+            console.warn('Delete failed, reloading products', result && result.error);
+            await loadProducts();
             setConfirmDialog(null);
-            showNotification('Failed to delete product: ' + result.error, 'error');
+
+            showNotification('Failed to delete product: ' + (result && result.error ? result.error : 'Unknown error'), 'error');
           }
         } catch (error) {
+          console.error('Error during product delete:', error);
+          await loadProducts();
           setConfirmDialog(null);
-          showNotification('Error deleting product: ' + error.message, 'error');
+
+          const msg = error && error.message ? error.message.toString() : '';
+          showNotification('Error deleting product: ' + msg, 'error');
         }
       },
       onCancel: () => setConfirmDialog(null)
@@ -663,11 +690,27 @@ const Products = () => {
     }
 
     try {
+      // Pre-check source quantity to give immediate feedback and avoid server error
+      const qtyRequested = parseFloat(transferData.quantity);
+      if (!isFinite(qtyRequested) || qtyRequested <= 0) {
+        showNotification('Invalid quantity', 'error');
+        return;
+      }
+
+      // Only check when a fromLocationId is provided
+      if (transferData.fromLocationId) {
+        const available = await ipcRenderer.invoke('get-product-location-quantity', transferData.productId, parseInt(transferData.fromLocationId));
+        if ((available || 0) < qtyRequested) {
+          showNotification(`Insufficient quantity in source location (available: ${available})`, 'error');
+          return;
+        }
+      }
+
       await ipcRenderer.invoke('create-location-transfer', {
         productId: transferData.productId,
         fromLocationId: parseInt(transferData.fromLocationId),
         toLocationId: parseInt(transferData.toLocationId),
-        quantity: parseFloat(transferData.quantity),
+        quantity: qtyRequested,
         reason: transferData.reason || null
       });
       
@@ -675,9 +718,13 @@ const Products = () => {
       closeTransferModal();
       await loadProducts();
     } catch (error) {
-      showNotification('Transfer failed: ' + error.message, 'error');
+      // Surface the DB error message (already thrown by queries.createLocationTransfer)
+      showNotification('Transfer failed: ' + (error && error.message ? error.message : String(error)), 'error');
     }
   };
+
+  // Load blocking transfers for a product (used when deletion is blocked)
+
 
   // Quick Update Quantity
   const handleQuickUpdate = async (e) => {
@@ -1076,188 +1123,116 @@ const Products = () => {
                                 marginBottom: 0
                               });
 
-      // Create print window with multiple barcodes based on quantity
-      const printWindow = window.open('', '_blank', 'width=400,height=600');
-      
       // Generate multiple barcode copies (shop name above, price below)
       let barcodeHTML = '';
       for (let i = 0; i < printQuantity; i++) {
         barcodeHTML += `
           <div class="barcode-label">
             <div class="shop-name">${settings.posName || 'POS'}</div>
-            <div class="barcode-image">
-              <img src="${canvas.toDataURL()}" alt="Barcode" />
-            </div>
+            <div class="barcode-image"><img src="${canvas.toDataURL()}" alt="Barcode"/></div>
             <div class="barcode-top-row">
               <div class="barcode-number">${printProduct.barcode}</div>
               <div class="product-price">${formatCurrency(printProduct.price, settings.currency)}</div>
             </div>
+            <div class="barcode-ref-row"><div class="barcode-ref">${printProduct.reference ? String(printProduct.reference) : ''}</div></div>
           </div>
           ${i < printQuantity - 1 ? '<div class="page-break"></div>' : ''}
         `;
       }
-      
-      printWindow.document.write(`
-           <html>
+
+      const fullHtml = `
+        <html>
           <head>
             <title>Print Barcode - ${printProduct.name}</title>
             <style>
-              @page {
-                size: 30mm 20mm;
-                margin: 0;
-              }
-              * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-              }
-              body {
-                font-family: Arial, sans-serif;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                padding: 0;
-                margin: 0;
-                background: white;
-              }
-              .barcode-label {
-                width: 30mm;
-                height: 20mm;
-                padding: 0.3mm;
-                background: white;
-                display: flex;
-                flex-direction: column;
-                justify-content: flex-start;
-                align-items: center;
-                page-break-after: always;
-                overflow: hidden;
-                gap: 0;
-              }
-                  .shop-name {
-                    font-size: 6px;
-                    color: #000;
-                    text-align: center;
-                    margin-bottom: 1px;
-                    line-height: 1;
-                    font-weight: 600;
-                  }
-                  .barcode-top-row {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    width: 100%;
-                    padding: 0 2px;
-                  }
-                  .barcode-number {
-                    font-size: 9px;
-                    font-weight: 600;
-                    text-align: left;
-                  }
-                  .product-price {
-                    font-size: 9px;
-                    font-weight: 600;
-                    text-align: right;
-                  }
-                  .barcode-image {
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    width: 100%;
-                    margin-top: 2px;
-                  }
-                  .barcode-image img {
-                    max-width: 28mm;
-                    max-height: 16mm;
-                    display: block;
-                    object-fit: contain;
-                  }
-              img {
-                max-width: 29mm;
-                max-height: 16mm;
-                display: block;
-                object-fit: contain;
-              }
-              .page-break {
-                page-break-after: always;
-                height: 0;
-              }
-              @media print {
-                body { 
-                  padding: 0;
-                  margin: 0;
-                }
-                .barcode-label {
-                  border: none;
-                  page-break-after: always;
-                }
-                .page-break {
-                  display: none;
-                }
-              }
+              @page { size: 30mm 20mm; margin: 0; }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 0; margin: 0; background: white; }
+              .barcode-label { width: 30mm; height: 20mm; padding: 0.3mm; background: white; display: flex; flex-direction: column; justify-content: flex-start; align-items: center; page-break-after: always; overflow: hidden; gap: 0; }
+              .shop-name { font-size: 6px; color: #000; text-align: center; margin-bottom: 1px; line-height: 1; font-weight: 600; }
+              .barcode-top-row { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 0 2px; }
+              .barcode-number { font-size: 9px; font-weight: 600; text-align: left; }
+              .product-price { font-size: 9px; font-weight: 600; text-align: right; }
+              .barcode-ref-row { width: 100%; text-align: center; margin-top: 1px; }
+              .barcode-ref { font-size: 7px; font-weight: 500; color: #000; }
+              .barcode-image { display: flex; justify-content: center; align-items: center; width: 100%; margin-top: 2px; }
+              .barcode-image img { max-width: 28mm; max-height: 16mm; display: block; object-fit: contain; }
+              img { max-width: 29mm; max-height: 16mm; display: block; object-fit: contain; }
+              .page-break { page-break-after: always; height: 0; }
+              @media print { body { padding: 0; margin: 0; } .barcode-label { border: none; page-break-after: always; } .page-break { display: none; } }
             </style>
           </head>
           <body>
             ${barcodeHTML}
-            <script>
-              window.onload = function() {
-                try {
-                  const imgs = Array.from(document.images || []);
-                  const loadPromises = imgs.map(img => new Promise(resolve => {
-                    if (img.complete) return resolve();
-                    img.onload = img.onerror = () => resolve();
-                  }));
-                  Promise.all(loadPromises).then(() => {
-                    setTimeout(function() {
-                      window.print();
-                      window.close();
-                    }, 200);
-                  }).catch(() => {
-                    setTimeout(function() {
-                      window.print();
-                      window.close();
-                    }, 500);
-                  });
-                } catch (e) {
-                  setTimeout(function() {
-                    window.print();
-                    window.close();
-                  }, 500);
-                }
-              };
-            </script>
           </body>
         </html>
-      `);
+      `;
+
+      // If running inside Electron, send print job to main process (targets any installed printer)
+      if (ipcRenderer) {
+        ipcRenderer.once('print-result', (ev, result) => {
+          if (result && result.success) showNotification('Barcode printed', 'success');
+          else showNotification((result && result.error) || 'Print failed', 'error');
+        });
+
+        ipcRenderer.send('print-receipt', {
+          html: fullHtml,
+          // Prefer dedicated barcodePrinter, fall back to receiptPrinter or system default
+          printerName: settings.barcodePrinter || settings.receiptPrinter || undefined,
+          showDialog: !!settings.printDialogOnPrint,
+          // Request multiple copies when user selected more than one barcode
+          copies: Math.max(1, printQuantity),
+          isLabel: true
+        });
+
+        setShowPrintModal(false);
+        return;
+      }
+
+      // Fallback for web: open print window where the user chooses printer
+      const printWindow = window.open('', '_blank', 'width=400,height=600');
+      printWindow.document.write(fullHtml);
       printWindow.document.close();
+      setTimeout(() => { printWindow.focus(); printWindow.print(); printWindow.close(); }, 200);
       setShowPrintModal(false);
+
+
+
+
+
+
+
+
     } catch (error) {
       showNotification('Error generating barcode: ' + error.message, 'error');
     }
   };
 
-  // Calculate product statistics
+  // Calculate product statistics (use per-location totals)
   const getProductStats = () => {
     const totalProducts = products.length;
-    
-    // Calculate total value with proper number conversion
+
+    // Calculate total value (use getTotalQty which sums per-location quantities)
     const totalValue = products.reduce((sum, p) => {
       const price = parseFloat(p.price) || 0;
-      const quantity = parseFloat(p.quantity) || 0;
+      const quantity = getTotalQty(p) || 0;
       return sum + (price * quantity);
     }, 0);
-    
-    // Low stock items (between 1 and 10)
+
+    // Low stock items (between 1 and lowStockThreshold)
     const lowStock = products.filter(p => {
-      const qty = parseFloat(p.quantity) || 0;
-      return qty > 0 && qty <= 10;
+      const qty = getTotalQty(p) || 0;
+      return qty > 0 && qty <= lowStockThreshold;
     }).length;
-    
+
     const outOfStock = products.filter(p => {
-      const qty = parseFloat(p.quantity) || 0;
+      const qty = getTotalQty(p) || 0;
       return qty === 0;
     }).length;
-    
+
     const expiringSoon = products.filter(p => {
+      const qty = getTotalQty(p) || 0;
+      if (qty <= 0) return false; // only consider items that exist in stock
       if (!p.expirationDate) return false;
       const daysUntilExpiry = Math.ceil((new Date(p.expirationDate) - today) / (1000 * 60 * 60 * 24));
       return daysUntilExpiry > 0 && daysUntilExpiry <= 30;
@@ -1271,22 +1246,22 @@ const Products = () => {
       }
     });
 
-    // Stock value by category
+    // Stock value by category (use per-location totals)
     const categoryValue = {};
     products.forEach(p => {
       if (p.category) {
         const price = parseFloat(p.price) || 0;
-        const quantity = parseFloat(p.quantity) || 0;
+        const quantity = getTotalQty(p) || 0;
         const value = price * quantity;
         categoryValue[p.category] = (categoryValue[p.category] || 0) + value;
       }
     });
 
-    // Top products by value
+    // Top products by value (use per-location totals)
     const topProducts = [...products]
       .map(p => {
         const price = parseFloat(p.price) || 0;
-        const quantity = parseFloat(p.quantity) || 0;
+        const quantity = getTotalQty(p) || 0;
         return { name: p.name, value: price * quantity };
       })
       .filter(p => p.value > 0)
@@ -1319,30 +1294,32 @@ const Products = () => {
 
   const themeColors = getThemeColors();
 
-  // Chart data
+  // Helper: generate N visually distinct colors (HSL wheel)
+  const generateColors = (n, alpha = 0.85) => {
+    if (!n || n <= 0) return ['rgba(200,200,200,0.6)'];
+    return Array.from({ length: n }, (_, i) => {
+      const hue = Math.round((i * 360) / Math.max(1, n));
+      return `hsla(${hue}, 70%, 50%, ${alpha})`;
+    });
+  };
+
+  // Chart data (use dynamic color arrays sized to data length)
   const categoryChartData = {
-    labels: Object.keys(stats.categoryCount),
+    labels: Object.keys(stats.categoryCount).map(k => displayCategory(k)),
     datasets: [{
       data: Object.values(stats.categoryCount),
-      backgroundColor: [
-        'rgba(255, 102, 0, 0.8)',
-        'rgba(255, 133, 51, 0.8)',
-        'rgba(255, 179, 102, 0.8)',
-        'rgba(255, 204, 153, 0.8)',
-        'rgba(204, 82, 0, 0.8)',
-        'rgba(255, 153, 77, 0.8)'
-      ],
+      backgroundColor: generateColors(Object.keys(stats.categoryCount).length),
       borderColor: themeColors.background,
       borderWidth: 2
     }]
   };
 
   const categoryValueChartData = {
-    labels: Object.keys(stats.categoryValue),
+    labels: Object.keys(stats.categoryValue).map(k => displayCategory(k)),
     datasets: [{
       label: t('products.stockValue', 'Stock Value'),
       data: Object.values(stats.categoryValue),
-      backgroundColor: 'rgba(255, 102, 0, 0.8)',
+      backgroundColor: generateColors(Object.keys(stats.categoryValue).length),
       borderColor: '#ff6600',
       borderWidth: 2
     }]
@@ -1353,7 +1330,7 @@ const Products = () => {
     datasets: [{
       label: 'Stock Value',
       data: stats.topProducts.map(p => p.value),
-      backgroundColor: 'rgba(255, 102, 0, 0.8)',
+      backgroundColor: generateColors(stats.topProducts.length),
       borderColor: '#ff6600',
       borderWidth: 2
     }]
@@ -1673,14 +1650,14 @@ const Products = () => {
             type="text"
             className="search-input"
             placeholder={t('products.search')}
-            value={searchTerm}
+            value={searchTerm ?? ''}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
           <span className="search-icon">🔍</span>
         </div>
 
         <div className="products-grid">
-          {filteredProducts.map((product) => (
+          {paginatedProducts.map((product) => (
             <div key={product.id} id={`product-${product.id}`} className={`product-card ${product.incomplete === 1 ? 'incomplete-product' : ''}`}>
               {product.incomplete === 1 && (
                 <div className="incomplete-badge">⚠️ Needs Completion</div>
@@ -1694,7 +1671,7 @@ const Products = () => {
               </div>
               <div className="product-details">
                 <h3 className="product-name">{product.name}</h3>
-                <p className="product-category">{product.category}</p>
+                <p className="product-category">{displayCategory(product.category)}</p>
                 <p className="product-barcode">{t('products.barcode')}: {product.barcode}</p>
                 <div className="product-info-row">
                   <span className="product-price">{formatCurrency(product.price, settings.currency)}</span>
@@ -1764,6 +1741,50 @@ const Products = () => {
             </div>
           ))}
         </div>
+
+        {/* Pagination controls (bottom) */}
+        <div className="pagination-container">
+          <div className="pagination-info">{t('Showing')} {startIndex + 1}-{Math.min(endIndex, totalItems)} / {totalItems}</div>
+          <div className="pagination-controls">
+            <button className="page-btn" onClick={() => setCurrentPage(1)} disabled={safePage === 1}>⟪</button>
+            <button className="page-btn" onClick={() => setCurrentPage(Math.max(1, safePage - 1))} disabled={safePage === 1}>‹</button>
+
+            {(() => {
+              // show up to 7 page buttons with truncation
+              const maxButtons = 7;
+              const pages = [];
+              let start = Math.max(1, safePage - Math.floor(maxButtons / 2));
+              let end = start + maxButtons - 1;
+              if (end > totalPages) { end = totalPages; start = Math.max(1, end - maxButtons + 1); }
+              for (let p = start; p <= end; p++) pages.push(p);
+              return (
+                <>
+                  {start > 1 && <button className="page-btn" onClick={() => setCurrentPage(1)}>1</button>}
+                  {start > 2 && <span className="ellipsis">…</span>}
+                  {pages.map(p => (
+                    <button key={p} className={`page-btn ${p === safePage ? 'active' : ''}`} onClick={() => setCurrentPage(p)}>{p}</button>
+                  ))}
+                  {end < totalPages - 1 && <span className="ellipsis">…</span>}
+                  {end < totalPages && <button className="page-btn" onClick={() => setCurrentPage(totalPages)}>{totalPages}</button>}
+                </>
+              );
+            })()}
+
+            <button className="page-btn" onClick={() => setCurrentPage(Math.min(totalPages, safePage + 1))} disabled={safePage === totalPages}>›</button>
+            <button className="page-btn" onClick={() => setCurrentPage(totalPages)} disabled={safePage === totalPages}>⟫</button>
+          </div>
+
+          <div className="page-size-select">
+            <label>{t('Page size')}: </label>
+            <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setCurrentPage(1); }}>
+              <option value={10}>10</option>
+              <option value={20}>20</option>
+              <option value={30}>30</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       {/* Quick Update Quantity Modal */}
@@ -1782,8 +1803,14 @@ const Products = () => {
                 <input
                   ref={quickBarcodeInputRef}
                   type="text"
-                  value={quickUpdateData.barcode}
+                  value={quickUpdateData.barcode ?? ''}
                   onChange={(e) => setQuickUpdateData({ ...quickUpdateData, barcode: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      document.getElementById('quick-update-quantity-input')?.focus();
+                    }
+                  }}
                   placeholder={t('products.scanOrEnterBarcode')}
                   autoFocus
                   required
@@ -1809,7 +1836,8 @@ const Products = () => {
               <div className="form-group">
                 <label>{t('products.quantityToAdd')}:</label>
                 <NumericInput
-                  value={quickUpdateData.quantity}
+                  id="quick-update-quantity-input"
+                  value={quickUpdateData.quantity ?? ''}
                   onChange={(e) => setQuickUpdateData({ ...quickUpdateData, quantity: e.target.value })}
                   placeholder={t('products.enterQuantity')}
                   min="0"
@@ -1844,8 +1872,15 @@ const Products = () => {
                 <div className="barcode-input-group">
                   <input
                     type="text"
-                    value={formData.barcode}
+                    value={formData.barcode ?? ''}
                     onChange={(e) => setFormData({ ...formData, barcode: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        // Prevent barcode scanner's trailing Enter from submitting the form
+                        e.preventDefault();
+                        productNameInputRef.current?.focus();
+                      }
+                    }}
                     required
                   />
                   <button
@@ -1857,11 +1892,23 @@ const Products = () => {
                   </button>
                 </div>
               </div>
+
+              <div className="form-group">
+                <label>{t('products.reference')}</label>
+                <input
+                  type="text"
+                  value={formData.reference ?? ''}
+                  onChange={(e) => setFormData({ ...formData, reference: e.target.value })}
+                  placeholder={t('products.referencePlaceholder')}
+                />
+              </div>
+
               <div className="form-group">
                 <label>{t('products.name')}</label>
                 <input
+                  ref={productNameInputRef}
                   type="text"
-                  value={formData.name}
+                  value={formData.name ?? ''}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   required
                 />
@@ -1870,20 +1917,20 @@ const Products = () => {
               <div className="form-group">
                 <label>{t('products.category')}</label>
                 <select
-                  value={formData.category}
+                  value={formData.category ?? ''}
                   onChange={e => setFormData({ ...formData, category: e.target.value })}
                   required
                 >
                   <option value="">{t('products.selectCategory', 'Select category')}</option>
                   {categories.map((cat, idx) => (
-                    <option key={idx} value={cat}>{cat}</option>
+                    <option key={idx} value={cat}>{displayCategory(cat)}</option>
                   ))}
                 </select>
                 <div className="form-group">
                   <label>{t('products.serialNumber')}</label>
                   <input
                     type="text"
-                    value={formData.serialNumber}
+                    value={formData.serialNumber ?? ''}
                     onChange={(e) => setFormData({ ...formData, serialNumber: e.target.value })}
                     placeholder={t('products.serialNumberPlaceholder')}
                   />
@@ -1893,7 +1940,7 @@ const Products = () => {
                 <div className="form-group">
                   <label>{t('products.detailPrice')}</label>
                   <NumericInput
-                    value={formData.price}
+                    value={formData.price ?? ''}
                     onChange={(e) => setFormData({ ...formData, price: e.target.value })}
                     min="0"
                     step="0.01"
@@ -1902,7 +1949,7 @@ const Products = () => {
                 <div className="form-group">
                   <label>{t('products.wholesalePrice')}</label>
                   <NumericInput
-                    value={formData.wholesalePrice}
+                    value={formData.wholesalePrice ?? ''}
                     onChange={(e) => setFormData({ ...formData, wholesalePrice: e.target.value })}
                     min="0"
                     step="0.01"
@@ -1912,14 +1959,14 @@ const Products = () => {
                   <label>{t('products.expirationDate')}</label>
                   <input
                     type="date"
-                    value={formData.expirationDate}
+                    value={formData.expirationDate ?? ''}
                     onChange={(e) => setFormData({ ...formData, expirationDate: e.target.value })}
                   />
                 </div>
                 <div className="form-group">
                   <label>{t('products.unitType', 'Unit Type')}</label>
                   <select
-                    value={formData.quantityType}
+                    value={formData.quantityType ?? 'unit'}
                     onChange={e => handleQuantityTypeChange(e.target.value)}
                     onBlur={e => handleQuantityTypeChange(e.target.value)}
                     style={{ width: '100%' }}
@@ -2058,15 +2105,15 @@ const Products = () => {
             <form className="manual-product-form" onSubmit={handleManualProductSubmit}>
               <div className="form-group">
                 <label>{t('products.name') || 'Name (optional)'}</label>
-                <input value={manualProductData.name} onChange={e => setManualProductData({ ...manualProductData, name: e.target.value })} placeholder={t('products.namePlaceholder') || 'e.g., Service'} />
+                <input value={manualProductData.name ?? ''} onChange={e => setManualProductData({ ...manualProductData, name: e.target.value })} placeholder={t('products.namePlaceholder') || 'e.g., Service'} />
               </div>
               <div className="form-group">
                 <label>{t('products.price') || 'Price'}</label>
-                <NumericInput value={manualProductData.price} onChange={e => setManualProductData({ ...manualProductData, price: e.target.value })} min="0" step="0.01" required />
+                <NumericInput value={manualProductData.price ?? ''} onChange={e => setManualProductData({ ...manualProductData, price: e.target.value })} min="0" step="0.01" required />
               </div>
               <div className="form-group">
                 <label>{t('products.quantity') || 'Quantity'}</label>
-                <NumericInput value={manualProductData.quantity} onChange={e => setManualProductData({ ...manualProductData, quantity: e.target.value })} min="0" step="0.01" />
+                <NumericInput value={manualProductData.quantity ?? ''} onChange={e => setManualProductData({ ...manualProductData, quantity: e.target.value })} min="0" step="0.01" />
               </div>
               <div className="form-group">
                 <label>{t('products.unitType', 'Unit Type')}</label>
@@ -2141,7 +2188,7 @@ const Products = () => {
                   type="number"
                   min="1"
                   max="100"
-                  value={printQuantity}
+                  value={printQuantity ?? 1}
                   onChange={(e) => setPrintQuantity(Math.max(1, parseInt(e.target.value) || 1))}
                   className="quantity-input"
                   autoFocus
@@ -2177,7 +2224,7 @@ const Products = () => {
               <div className="form-group">
                 <label>{t('products.fromLocation')} *</label>
                 <select
-                  value={transferData.fromLocationId}
+                  value={transferData.fromLocationId ?? ''}
                   onChange={(e) => setTransferData({ ...transferData, fromLocationId: e.target.value })}
                   required
                 >
@@ -2193,7 +2240,7 @@ const Products = () => {
               <div className="form-group">
                 <label>{t('products.toLocation')} *</label>
                 <select
-                  value={transferData.toLocationId}
+                  value={transferData.toLocationId ?? ''}
                   onChange={(e) => setTransferData({ ...transferData, toLocationId: e.target.value })}
                   required
                 >
@@ -2212,7 +2259,7 @@ const Products = () => {
                   type="number"
                   min="0.01"
                   step="0.01"
-                  value={transferData.quantity}
+                  value={transferData.quantity ?? ''}
                   onChange={(e) => setTransferData({ ...transferData, quantity: e.target.value })}
                   placeholder={t('products.enterTransferQuantity')}
                   required
@@ -2222,7 +2269,7 @@ const Products = () => {
               <div className="form-group">
                 <label>{t('products.transferReason')}</label>
                 <textarea
-                  value={transferData.reason}
+                  value={transferData.reason ?? ''}
                   onChange={(e) => setTransferData({ ...transferData, reason: e.target.value })}
                   placeholder={t('products.enterTransferReason')}
                   rows="3"
@@ -2241,7 +2288,10 @@ const Products = () => {
           </div>
         </div>
       )}
-      
+
+      {/* Blocking transfers modal (shown when deletion is blocked by transfers) */}
+
+
       {notification && (
         <Notification 
           message={notification.message}

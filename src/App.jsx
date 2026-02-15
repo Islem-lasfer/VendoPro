@@ -25,6 +25,7 @@ import TPESettings from './pages/TPESettings/TPESettings';
 import { isSetupCompleted, isPasswordRequired } from './utils/auth';
 import './App.css';
 import Notification from './components/Notification/Notification';
+import UpdateNotification from './update/UpdateNotification';
 
 // Clear session before anything else
 if (typeof window !== 'undefined') {
@@ -175,6 +176,7 @@ function App() {
   // Only allow Setup page if activated
   return (
     <SettingsProvider>
+      <UpdateNotification />
       {/* Global Notification bridge (shown on any 'app-notification' event) */}
       {appNotification && (
         <Notification

@@ -3,9 +3,10 @@
 // This logic matches the backend: generateLicenseKey(mac) and validateLicenseKey(key, mac)
 
 function getMachineId() {
-  // In Electron, use node-machine-id or MAC address automatically
+  // Prefer disk ID when available, otherwise fall back to node-machine-id
   if (typeof window !== 'undefined' && window.require) {
     try {
+      // Use node-machine-id as a safe fallback
       const { machineIdSync } = window.require('node-machine-id');
       return machineIdSync({ original: true });
     } catch {
@@ -15,6 +16,60 @@ function getMachineId() {
   // In browser/dev: use a static string for testing only
   return 'BROWSER-MOCK-ID';
 }
+
+function normalizeId(id) {
+  if (!id) return null;
+  return id.toString().replace(/[^A-Z0-9]/gi, '').toUpperCase();
+}
+
+function getDiskId() {
+  // Try to read a disk/machine serial on the client (Windows-first implementation)
+  if (typeof window !== 'undefined' && window.require) {
+    try {
+      const child = window.require('child_process');
+      const os = window.require('os');
+      if (os.platform() === 'win32') {
+        // Try common WMIC commands to get a consistent serial
+        try {
+          const out = child.execSync('wmic diskdrive get SerialNumber').toString();
+          const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          if (lines.length >= 2) {
+            // Take the first non-empty serial
+            const serial = lines[1].replace(/\s+/g, '');
+            if (serial) return normalizeId(serial);
+          }
+        } catch (e) {
+          // ignore and try BIOS serial
+        }
+        try {
+          const out2 = child.execSync('wmic bios get serialnumber').toString();
+          const lines2 = out2.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          if (lines2.length >= 2) {
+            const serial = lines2[1].replace(/\s+/g, '');
+            if (serial) return normalizeId(serial);
+          }
+        } catch (e) {
+          // fallback
+        }
+      } else {
+        // Try Linux / Mac heuristics (lsblk or ioreg)
+        try {
+          const out = child.execSync("lsblk -o SERIAL -dn | head -n1").toString().trim();
+          if (out) return normalizeId(out);
+        } catch {}
+        try {
+          const out = child.execSync("ioreg -l | grep IOPlatformSerialNumber | awk '{print $4}'").toString().trim();
+          if (out) return normalizeId(out.replace(/\"/g, '').trim());
+        } catch {}
+      }
+    } catch (err) {
+      // ignore and fallback
+    }
+  }
+  // Fallback to machineId if disk id not available
+  return normalizeId(getMachineId());
+}
+
 
 function generateLicenseKey(mac) {
   // Same as backend: sha256(mac), format XXXX-XXXX-XXXX-XXXX
@@ -71,6 +126,8 @@ const licenseUtil = {
   generateLicenseKey,
   validateLicenseOnline,
   getMachineId,
+  getDiskId,
+  normalizeId,
   verifyLicenseKey,
   storeActivation,
   loadActivation

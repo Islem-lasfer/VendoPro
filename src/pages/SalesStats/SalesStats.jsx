@@ -309,13 +309,14 @@ const SalesStats = () => {
       const categoryLabels = [];
       const categoryValues = [];
       Object.entries(categoryStats).forEach(([cat, data]) => {
+        const displayCat = String(cat).toLowerCase() === 'miscellaneous' ? t('settings.products_category_miscellaneous', 'Miscellaneous') : cat;
         if (Object.keys(data.priceTypes).length > 0) {
           Object.entries(data.priceTypes).forEach(([ptype, val]) => {
-            categoryLabels.push(`${cat}: ${formatCurrency(val)} (${ptype})`);
+            categoryLabels.push(`${displayCat}: ${formatCurrency(val)} (${ptype})`);
             categoryValues.push(val);
           });
         } else {
-          categoryLabels.push(`${cat}: ${formatCurrency(data.total)}`);
+          categoryLabels.push(`${displayCat}: ${formatCurrency(data.total)}`);
           categoryValues.push(data.total);
         }
       });

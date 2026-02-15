@@ -1,11 +1,25 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, shell, dialog } = require('electron');
-const log = require('electron-log');
-const { autoUpdater } = require('electron-updater');
 const fs = require('fs');
 const path = require('path');
 const license = require('./electron/license');
+const autoUpdater = require('./src/update/electron-auto-updater');
 
-const LICENSE_STORE_PATH = path.join(__dirname, 'electron', 'license.json');
+// Log any uncaught promise rejections to avoid silent crashes during printing/hardware operations
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UnhandledPromiseRejection:', reason && (reason.stack || reason));
+});
+
+// Store the license in the user's data directory (writable) instead of inside the app.asar
+// e.g. Windows: C:\Users\<User>\AppData\Roaming\VendoPro\electron\license.json
+const USER_DATA_PATH = (app && app.getPath) ? app.getPath('userData') : path.join(__dirname, 'electron');
+const LICENSE_DIR = path.join(USER_DATA_PATH, 'electron');
+try {
+  if (!fs.existsSync(LICENSE_DIR)) fs.mkdirSync(LICENSE_DIR, { recursive: true });
+} catch (err) {
+  console.error('❌ Could not create license directory:', err.message);
+}
+const LICENSE_STORE_PATH = path.join(LICENSE_DIR, 'license.json');
+console.log('ℹ️  License store path:', LICENSE_STORE_PATH);
 
 // Get stored license data (including payload and signature for offline use)
 function getStoredLicense() {
@@ -37,7 +51,7 @@ function checkLicense() {
   }
   
   // 🔒 MACHINE BINDING: Verify this is the same machine
-  const currentMachineId = license.getMacAddress() || 'UNKNOWN';
+  const currentMachineId = license.getMachineId() || 'UNKNOWN';
   if (stored.machine_id && stored.machine_id !== currentMachineId) {
     console.log('❌ License is bound to a different machine');
     console.log(`   Registered: ${stored.machine_id}`);
@@ -61,15 +75,23 @@ function checkLicense() {
 }
 
 // IPC handler for OFFLINE-ONLY license activation with machine binding
-ipcMain.handle('activate-license', async (event, key, payload = null, signature = null) => {
+ipcMain.handle('activate-license', async (event, key, payload = null, signature = null, clientMachineId = null) => {
   try {
     if (!validateLicenseKey(key)) {
       return { success: false, error: 'Clé de licence invalide.' };
     }
 
-    const machineId = license.getMacAddress() || 'UNKNOWN';
+    // Prefer client-provided machine id (from renderer) if present, else detect here
+    const providedId = clientMachineId || license.getMachineId();
+    const normalizedMachineId = license.normalizeId ? license.normalizeId(providedId) : providedId;
     const storedLicense = getStoredLicense();
     
+    // If client provided a different id than we detect locally, log it
+    const detected = license.getMachineId();
+    if (detected && normalizedMachineId !== (license.normalizeId ? license.normalizeId(detected) : detected)) {
+      console.log('⚠️ Notice: renderer provided machine id differs from local detection. Using provided id for activation.');
+    }
+
     // Check if this is first activation (no stored license)
     const isFirstActivation = !storedLicense || !storedLicense.machine_id;
     
@@ -78,17 +100,17 @@ ipcMain.handle('activate-license', async (event, key, payload = null, signature 
       license_key: key,
       payload: payload || (storedLicense && storedLicense.payload),
       signature: signature || (storedLicense && storedLicense.signature),
-      machine_id: machineId
+      machine_id: normalizedMachineId
     };
 
     // OFFLINE-ONLY activation
-    const result = await license.activateLicense(key, machineId, licenseData, isFirstActivation);
+    const result = await license.activateLicense(key, normalizedMachineId, licenseData, isFirstActivation);
 
     if (result.success) {
       // Save license with machine binding
       const licenseToSave = {
         key: key,
-        machine_id: machineId, // LOCKED to this machine
+        machine_id: normalizedMachineId, // LOCKED to this machine (normalized)
         expire_at: result.data.expire_at,
         payload: payload || (storedLicense && storedLicense.payload),
         signature: signature || (storedLicense && storedLicense.signature),
@@ -114,12 +136,50 @@ ipcMain.handle('activate-license', async (event, key, payload = null, signature 
   }
 });
 
-// Call checkLicense before anything else
-try {
-  checkLicense();
-} catch (err) {
-  console.error('❌ License error:', err.message);
-}
+// IPC: start a 7-day trial (creates a local, machine‑bound trial license)
+ipcMain.handle('start-trial', async (event, days = 7) => {
+  try {
+    const trialDays = parseInt(days, 10) || 7;
+    const machineId = license.getMachineId();
+    const normalizedMachineId = license.normalizeId ? license.normalizeId(machineId) : machineId;
+    const now = new Date();
+    const expireAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000).toISOString();
+
+    // Generate a 5x5 license key so it passes validateLicenseKey()
+    function genKey() {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      const parts = [];
+      for (let i = 0; i < 5; i++) {
+        let part = '';
+        for (let j = 0; j < 5; j++) {
+          part += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        parts.push(part);
+      }
+      return parts.join('-');
+    }
+
+    const key = genKey();
+
+    const licenseToSave = {
+      key,
+      machine_id: normalizedMachineId,
+      expire_at: expireAt,
+      payload: null,
+      signature: null,
+      activated_at: now.toISOString(),
+      mode: 'trial',
+      trial: true,
+      max_devices: 1
+    };
+
+    saveLicense(licenseToSave);
+
+    return { success: true, license_key: key, expire_at: expireAt, days: trialDays };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 // OFFLINE-ONLY: No periodic validation needed
 // License is verified only at startup through signature verification and machine binding
@@ -216,7 +276,34 @@ function createWindow() {
       mainWindow.webContents.send('request-close');
     }
   });
+
+  // 🔄 ATTACH AUTO-UPDATER TO WINDOW (always)
+  // Ensure renderer receives `update-status` events even in development so UI reflects errors/results.
+  try {
+    autoUpdater.setMainWindow(mainWindow);
+  } catch (err) {
+    console.warn('AutoUpdater: could not set main window -', err && err.message);
+  }
+
+  // Start periodic update checks only when packaged
+  if (app.isPackaged) {
+    autoUpdater.startPeriodicChecks(4);
+
+    // On every application start, perform a silent update check if internet is available.
+    // We use a DNS lookup to avoid adding extra dependencies.
+    const dns = require('dns');
+    dns.lookup('github.com', (err) => {
+      if (!err) {
+        console.log('AutoUpdater: network available on startup — checking for updates (silent)');
+        // silent, non-intrusive check (renderer treats this as 'periodic')
+        autoUpdater.checkForUpdatesQuietly();
+      } else {
+        console.log('AutoUpdater: no network on startup — skipping update check');
+      }
+    });
+  }
 }
+
 
 app.whenReady().then(async () => {
   // Initialize database
@@ -246,74 +333,6 @@ globalShortcut.register('CommandOrControl+Shift+R', () => {
       `);
   });
 
-  // ============= AUTO-UPDATER =============
-  // configure logger
-  autoUpdater.logger = log;
-  autoUpdater.logger.transports.file.level = 'info';
-  autoUpdater.autoDownload = true; // automatically download updates when found
-
-  autoUpdater.on('checking-for-update', () => {
-    log.info('Checking for update...');
-    if (mainWindow) mainWindow.webContents.send('update-checking');
-  });
-
-  autoUpdater.on('update-available', (info) => {
-    log.info('Update available: ' + info.version);
-    if (mainWindow) mainWindow.webContents.send('update-available', info);
-  });
-
-  autoUpdater.on('update-not-available', () => {
-    log.info('No updates available');
-    if (mainWindow) mainWindow.webContents.send('update-not-available');
-  });
-
-  autoUpdater.on('download-progress', (progressObj) => {
-    if (mainWindow) mainWindow.webContents.send('update-download-progress', progressObj);
-  });
-
-  autoUpdater.on('update-downloaded', (info) => {
-    log.info('Update downloaded: ' + info.version);
-    if (mainWindow) {
-      mainWindow.webContents.send('update-downloaded', info);
-      const result = dialog.showMessageBoxSync(mainWindow, {
-        type: 'question',
-        buttons: ['Restart and install', 'Later'],
-        defaultId: 0,
-        cancelId: 1,
-        title: 'Update ready',
-        message: `Version ${info.version} has been downloaded. Restart to install?`
-      });
-      if (result === 0) {
-        autoUpdater.quitAndInstall();
-      }
-    }
-  });
-
-  // Check for updates shortly after startup then periodically
-  setTimeout(() => {
-    autoUpdater.checkForUpdatesAndNotify();
-  }, 5000);
-  setInterval(() => autoUpdater.checkForUpdatesAndNotify(), 6 * 60 * 60 * 1000); // every 6 hours
-
-  // IPC channel to trigger an update check from renderer
-  ipcMain.handle('app:check-for-updates', async () => {
-    try {
-      await autoUpdater.checkForUpdates();
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
-  });
-
-  ipcMain.handle('app:install-update', async () => {
-    try {
-      autoUpdater.quitAndInstall();
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
-  });
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -327,6 +346,40 @@ app.on('window-all-closed', () => {
     closeDatabase();
     app.quit();
   }
+});
+
+// 🔄 ADD AUTO-UPDATER IPC HANDLERS
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    // Delegate to the AutoUpdater which will emit the appropriate 'checking' event with source info
+    autoUpdater.manualCheckForUpdates();
+    return { success: true };
+  } catch (error) {
+    // Forward error to renderer as well
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('update-status', { event: 'update-error', data: error });
+    }
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-app-version', async () => {
+  return app.getVersion();
+});
+
+ipcMain.handle('download-update', async () => {
+  try {
+    const { autoUpdater: updater } = require('electron-updater');
+    await updater.downloadUpdate();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('install-update', async () => {
+  const { autoUpdater: updater } = require('electron-updater');
+  setImmediate(() => updater.quitAndInstall(false, true));
 });
 
 // ============= FONT FILE HANDLER =============
@@ -356,6 +409,19 @@ ipcMain.handle('read-font-file', async (event, fontPath) => {
   } catch (error) {
     console.error('❌ Error reading font file:', error);
     return null;
+  }
+});
+
+// IPC: return available system printers (renderer can use this to populate a select)
+ipcMain.handle('printers:get', async () => {
+  try {
+    if (!mainWindow || !mainWindow.webContents) return [];
+    const printers = mainWindow.webContents.getPrinters();
+    // Return simplified objects: name and isDefault
+    return printers.map(p => ({ name: p.name, isDefault: !!p.isDefault }));
+  } catch (err) {
+    console.error('Failed to get printers:', err && err.message);
+    return [];
   }
 });
 
@@ -712,10 +778,120 @@ ipcMain.on('barcode-scanned', (event, barcode) => {
 });
 
 // IPC handler for printing
-ipcMain.on('print-receipt', (event, receiptData) => {
-  // Receipt printing logic will be implemented here
-  console.log('Print receipt:', receiptData);
-  event.reply('print-result', { success: true });
+ipcMain.on('print-receipt', async (event, receiptData = {}) => {
+  console.log('Print receipt request:', receiptData);
+
+  // Build a minimal HTML receipt (renderer already sends structured receiptData)
+  const buildReceiptHtml = (r) => {
+    // If renderer already provided a pre-built HTML payload, use it directly
+    if (r && r.html && typeof r.html === 'string') return r.html;
+
+    const itemsHtml = (r.items || []).map(i => `
+      <tr>
+        <td style="padding:2px 0">${(i.name || '')}</td>
+        <td style="text-align:right;padding:2px 0">${(i.quantity || 1)} x ${(i.price || 0).toFixed(2)}</td>
+      </tr>
+    `).join('');
+
+    return `
+      <div style="font-family: Arial, sans-serif; width:100%">
+        <h2 style="margin:6px 0;text-align:center">${(r.storeName || '')}</h2>
+        <div style="font-size:12px;margin-bottom:6px;text-align:center">${(r.storeAddress || '')}</div>
+        <div style="margin:6px 0">${(r.date || new Date().toLocaleString())}</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse">
+          ${itemsHtml}
+        </table>
+        <hr/>
+        <div style="display:flex;justify-content:space-between;font-weight:700">
+          <div>Subtotal</div><div>${(r.subtotal || 0).toFixed(2)}</div>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <div>Tax</div><div>${(r.tax || 0).toFixed(2)}</div>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <div>Discount</div><div>${(r.discount || 0).toFixed(2)}</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;margin-top:6px">
+          <div>Total</div><div>${(r.total || 0).toFixed(2)}</div>
+        </div>
+        <div style="text-align:center;margin-top:8px;font-size:12px">${(r.paymentMethod || '')}</div>
+        <div style="text-align:center;margin-top:8px;font-size:11px">${(r.footer || '')}</div>
+      </div>
+    `;
+  };
+
+  const html = buildReceiptHtml(receiptData);
+  const printerName = receiptData.printerName || undefined;
+  const showDialog = receiptData.showDialog === true; // if true, open native print dialog
+
+  try {
+    // If user requested a dialog, skip POS library and use webContents.print with dialog
+    if (showDialog) {
+      mainWindow.webContents.print({ silent: false }, (success, failureReason) => {
+        if (success) event.reply('print-result', { success: true });
+        else event.reply('print-result', { success: false, error: failureReason || 'Print failed' });
+      });
+      return;
+    }
+
+    // Prefer electron-pos-printer (prints HTML/CSS to POS printers) when available
+    const { PosPrinter } = require('electron-pos-printer');
+
+    const options = {
+      preview: false,
+      width: '80mm',
+      margin: '0 0 0 0',
+      copies: receiptData.copies || 1,
+      printerName: printerName,
+      silent: true,
+      timeOutPerLine: 100
+    };
+
+    // electron-pos-printer expects an array of "lines". use a single `text` line whose value is the HTML markup
+    const posPrintData = [
+      {
+        type: 'text',
+        value: html,
+        style: { fontSize: '12px', textAlign: 'left' }
+      }
+    ];
+
+    // Defensive normalization: if some caller accidentally passed a string/non-iterable, normalize to an array.
+    const normalizedPosData = Array.isArray(posPrintData) ? posPrintData : [{ type: 'text', value: String(posPrintData) }];
+
+    // Log printer attempt for easier debugging
+    console.log('Attempting electron-pos-printer with data lines:', normalizedPosData.length, 'printerName:', options.printerName || '(system default)');
+
+    // Correct call signature: PosPrinter.print(dataArray, options)
+    await PosPrinter.print(normalizedPosData, options).catch(err => {
+      // Ensure any rejection is handled here (prevents unhandled promise rejection coming from the module)
+      console.warn('PosPrinter.print rejected:', err && err.message ? err.message : err);
+      throw err; // rethrow so outer try/catch falls back to webContents.print
+    });
+
+    event.reply('print-result', { success: true });
+    return;
+  } catch (err) {
+    console.warn('electron-pos-printer failed or not available, falling back to webContents.print —', err && err.message);
+  }
+
+  // Fallback: use Electron's webContents.print (works with system printers)
+  try {
+    // If a specific device name was provided, pass it; otherwise use silent default printer
+    const printOptions = { silent: true };
+    if (printerName) printOptions.deviceName = printerName;
+
+    mainWindow.webContents.print(printOptions, (success, failureReason) => {
+      if (success) {
+        event.reply('print-result', { success: true });
+      } else {
+        event.reply('print-result', { success: false, error: failureReason || 'Unknown print error' });
+      }
+    });
+  } catch (err) {
+    console.error('Print failed:', err);
+    event.reply('print-result', { success: false, error: err.message });
+  }
 });
 
 // IPC handler for cash drawer
@@ -939,6 +1115,34 @@ ipcMain.handle('get-mac-address', async () => {
   }
 });
 
+// Send license request (client contact info + disk id) to vendor email
+ipcMain.handle('send-license-request', async (event, info) => {
+  try {
+    const { clientName, clientEmail, clientPhone, diskId } = info || {};
+    if (!clientName || !clientEmail) {
+      return { success: false, error: 'Client name and email are required.' };
+    }
+
+    const transporter = createTransporter();
+
+    const body = `Offline license request\n\nClient name: ${clientName}\nClient email: ${clientEmail}\nClient phone: ${clientPhone || 'N/A'}\nDisk ID: ${diskId || 'N/A'}\nHost: ${require('os').hostname()}\nDate: ${new Date().toISOString()}`;
+
+    const mailOptions = {
+      from: EMAIL_CONFIG.auth.user,
+      to: EMAIL_CONFIG.auth.user, // send to pos.sales.system@gmail.com
+      subject: `Offline License Request from ${clientName}`,
+      text: body
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log('✅ License request email sent.');
+    return { success: true };
+  } catch (err) {
+    console.error('❌ Failed to send license request:', err);
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle('check-license-activated', async () => {
   try {
     const stored = getStoredLicense();
@@ -951,12 +1155,13 @@ ipcMain.handle('check-license-activated', async () => {
 // Database Server Management
 // Database Server Management
 // Database Server Management
-let dbServerModule = null;
-let dbHttpServer = null;
+// Database Server Management
+// Database Server Management - Using Child Process
+let dbServerProcess = null;
 
 ipcMain.handle('start-database-server', async () => {
   try {
-    if (dbHttpServer) {
+    if (dbServerProcess) {
       return { 
         success: true, 
         message: 'Database server already running',
@@ -988,75 +1193,126 @@ ipcMain.handle('start-database-server', async () => {
       : path.join(__dirname, 'electron', 'database', 'pos.db');
     
     console.log('[DB Server] Using database at:', dbFilePath);
-    process.env.DB_FILE_PATH = dbFilePath;
-    process.env.PORT = '3001';
-    process.env.NODE_ENV = isDev ? 'development' : 'production';
 
-    // ✅ IMPORTANT: Load ES module using dynamic import
-    try {
-      console.log('[DB Server] Loading server module from:', serverModulePath);
-      
-      // Use dynamic import for ES modules
-      dbServerModule = await import(`file://${serverModulePath}`);
-      
-      // Get the server instance
-      dbHttpServer = dbServerModule.server || dbServerModule.default;
+    // ✅ Use child process to run the server
+    const { spawn } = require('child_process');
+    
+    dbServerProcess = spawn('node', [serverModulePath], {
+      env: {
+        ...process.env,
+        DB_FILE_PATH: dbFilePath,
+        PORT: '3001',
+        NODE_ENV: isDev ? 'development' : 'production'
+      },
+      cwd: serverPath,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
 
-      if (!dbHttpServer) {
-        throw new Error('Server module did not export a server instance');
-      }
+    // Log server output
+    dbServerProcess.stdout.on('data', (data) => {
+      console.log('[DB Server]', data.toString().trim());
+    });
 
+    dbServerProcess.stderr.on('data', (data) => {
+      console.error('[DB Server Error]', data.toString().trim());
+    });
+
+    dbServerProcess.on('close', (code) => {
+      console.log('[DB Server] Process exited with code', code);
+      dbServerProcess = null;
+    });
+
+    dbServerProcess.on('error', (error) => {
+      console.error('[DB Server] Process error:', error);
+      dbServerProcess = null;
+    });
+
+    // ✅ Wait a moment for server to start
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // ✅ Verify server started by checking if process is still running
+    if (dbServerProcess && dbServerProcess.exitCode === null) {
       console.log('[DB Server] Server started successfully on port 3001');
-      
       return { 
         success: true, 
         message: 'Database server started successfully'
       };
-
-    } catch (requireError) {
-      console.error('[DB Server] Failed to load server module:', requireError);
-      return { 
-        success: false, 
-        error: `Failed to load server: ${requireError.message}` 
+    } else {
+      return {
+        success: false,
+        error: 'Server process failed to start or exited immediately'
       };
     }
 
   } catch (error) {
     console.error('[DB Server] Error:', error);
+    dbServerProcess = null;
     return { success: false, error: error.message };
   }
 });
 
 ipcMain.handle('stop-database-server', async () => {
   try {
-    if (dbHttpServer) {
-      return new Promise((resolve) => {
-        dbHttpServer.close(() => {
-          dbHttpServer = null;
-          dbServerModule = null;
-          console.log('[DB Server] Server stopped successfully');
-          resolve({ success: true, message: 'Database server stopped' });
-        });
-      });
+    console.log('[DB Server] Stop requested');
+
+    if (!dbServerProcess) {
+      console.log('[DB Server] No server running');
+      return { success: true, message: 'Server was not running' };
     }
-    return { success: true, message: 'Server was not running' };
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log('[DB Server] Force killing server (timeout)');
+        try {
+          dbServerProcess.kill('SIGKILL');
+        } catch (e) {
+          console.error('[DB Server] Error force killing:', e);
+        }
+        dbServerProcess = null;
+        resolve({ success: true, message: 'Database server stopped (forced)' });
+      }, 5000);
+
+      dbServerProcess.on('close', () => {
+        clearTimeout(timeout);
+        dbServerProcess = null;
+        console.log('[DB Server] Server stopped successfully');
+        resolve({ success: true, message: 'Database server stopped' });
+      });
+
+      // ✅ Send SIGTERM to gracefully stop the server
+      try {
+        console.log('[DB Server] Sending SIGTERM to server process');
+        dbServerProcess.kill('SIGTERM');
+      } catch (killError) {
+        clearTimeout(timeout);
+        console.error('[DB Server] Error sending SIGTERM:', killError);
+        dbServerProcess = null;
+        resolve({ success: true, message: 'Database server stopped (error)' });
+      }
+    });
   } catch (error) {
+    console.error('[DB Server] Error in stop handler:', error);
+    dbServerProcess = null;
     return { success: false, error: error.message };
   }
 });
 
 ipcMain.handle('get-database-server-status', async () => {
-  return {
-    running: dbHttpServer !== null
-  };
+  const running = dbServerProcess !== null && dbServerProcess.exitCode === null;
+  console.log('[DB Server] Status check:', { running, hasProcess: !!dbServerProcess });
+  return { running };
 });
 
 // Clean up server on app quit
 app.on('before-quit', () => {
-  if (dbHttpServer) {
-    dbHttpServer.close();
-    dbHttpServer = null;
-    dbServerModule = null;
+  if (dbServerProcess) {
+    try {
+      console.log('[DB Server] Killing server on app quit');
+      dbServerProcess.kill('SIGTERM');
+    } catch (err) {
+      console.error('[DB Server] Error killing on quit:', err);
+    }
+    dbServerProcess = null;
   }
 });
 
@@ -1098,7 +1354,27 @@ ipcMain.handle('db:getAllLocations', async () => {
     return JSON.parse(JSON.stringify(locations));
   } catch (error) {
     console.error('Error getting locations (db:getAllLocations):', error);
-    throw error;
+    return { success: false, error: error.message };
+  }
+});
+
+// Local DB IPC for location transfers (used by renderer helpers in local mode)
+ipcMain.handle('db:getLocationTransfers', async (event, productId) => {
+  try {
+    const queries = require('./electron/database/queries');
+    return { success: true, data: queries.getLocationTransfers(productId) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('db:deleteLocationTransfer', async (event, transferId) => {
+  try {
+    const queries = require('./electron/database/queries');
+    const r = queries.deleteLocationTransfer(transferId);
+    return r;
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 });
 
@@ -1202,6 +1478,16 @@ ipcMain.handle('get-location-transfers', async (event, productId) => {
     return queries.getLocationTransfers(productId);
   } catch (error) {
     console.error('Error getting location transfers:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-location-transfer', async (event, transferId) => {
+  try {
+    const queries = require('./electron/database/queries');
+    return queries.deleteLocationTransfer(transferId);
+  } catch (error) {
+    console.error('Error deleting location transfer:', error);
     throw error;
   }
 });

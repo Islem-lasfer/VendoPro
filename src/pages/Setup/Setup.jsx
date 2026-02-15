@@ -31,12 +31,15 @@ const Setup = ({ onComplete }) => {
     usePassword: false,
     password: '',
     taxId: '',
+    rc: '',
+    ai: '',
+    nis: '',
     taxRate: 10,
     discountRate: 0,
     currency: 'USD',
     phone1: '',
     phone2: '',
-    categories: [],
+    categories: ['miscellaneous'],
     shops: [{ name: 'Shop 1' }],
     stocks: [{ name: 'Stock 1' }]
   });
@@ -108,6 +111,9 @@ const Setup = ({ onComplete }) => {
         email: formData.email,
         shopAddress: formData.shopAddress,
         taxId: formData.taxId,
+        rc: formData.rc || '',
+        ai: formData.ai || '',
+        nis: formData.nis || '',
         taxRate: formData.taxRate,
         discountRate: formData.discountRate,
         currency: formData.currency,
@@ -154,6 +160,9 @@ const Setup = ({ onComplete }) => {
         posLogo: shopSettings.posLogo,
         shopAddress: shopSettings.shopAddress,
         taxId: shopSettings.taxId,
+        rc: shopSettings.rc || '',
+        ai: shopSettings.ai || '',
+        nis: shopSettings.nis || '',
         taxRate: shopSettings.taxRate,
         discountRate: shopSettings.discountRate,
         currency: shopSettings.currency,
@@ -307,6 +316,36 @@ const Setup = ({ onComplete }) => {
             </div>
 
             <div className="form-group">
+              <label>RC (Registration Number, optional)</label>
+              <input
+                type="text"
+                value={formData.rc}
+                onChange={e => setFormData({ ...formData, rc: e.target.value })}
+                placeholder="RC (optional)"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>AI (Tax Office Code, optional)</label>
+              <input
+                type="text"
+                value={formData.ai}
+                onChange={e => setFormData({ ...formData, ai: e.target.value })}
+                placeholder="AI (optional)"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>NIS (Statistical ID, optional)</label>
+              <input
+                type="text"
+                value={formData.nis}
+                onChange={e => setFormData({ ...formData, nis: e.target.value })}
+                placeholder="NIS (optional)"
+              />
+            </div>
+
+            <div className="form-group">
               <label>Tax Rate (%) *</label>
               <input
                 type="number"
@@ -358,7 +397,7 @@ const Setup = ({ onComplete }) => {
               <div className="category-input-wrapper" style={{display:'flex',flexWrap:'wrap',gap:'8px',padding:'4px',border:'1px solid #cccccc1a',borderRadius:'6px',background:'transparent'}}>
                 {(Array.isArray(formData.categories) ? formData.categories : (formData.categories ? formData.categories.split(',').map(c=>c.trim()).filter(Boolean) : [])).map((cat, idx) => (
                   <span key={idx} style={{background:'#ff9800',color:'#fff',borderRadius:'16px',padding:'2px 12px',display:'flex',alignItems:'center',margin:'6px 1px', fontSize:'0.85em'}}>
-                    {cat}
+                    {String(cat).toLowerCase() === 'miscellaneous' ? t('settings.products_category_miscellaneous', 'Miscellaneous') : cat}
                     <button type="button" style={{marginLeft:'6px',background:'none',border:'none',color:'#fff',fontWeight:'bold',cursor:'pointer', fontSize:'1em'}} onClick={() => {
                       const cats = Array.isArray(formData.categories) ? formData.categories : (formData.categories ? formData.categories.split(',').map(c=>c.trim()).filter(Boolean) : []);
                       setFormData({ ...formData, categories: cats.filter((_, i) => i !== idx) });
