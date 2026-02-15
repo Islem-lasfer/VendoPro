@@ -24,25 +24,24 @@ import autoTable from 'jspdf-autotable';
 import { useTranslation } from 'react-i18next';
 import { useSettings } from '../../context/SettingsContext';
 import { formatCurrency } from '../../utils/currency';
-import { getAllProducts, getAllSettings, createInvoice, createSupplierInvoice, searchClients, createClient } from '../../utils/database';
-import { loadPdfFonts, setPdfFont, getAutoTableStyles } from '../../utils/pdfFonts';
+import { getAllProducts, getAllSettings, getAllInvoices, createInvoice, createSupplierInvoice, searchClients, createClient } from '../../utils/database';
+// Lazy-load pdf font utilities to enable dynamic chunking and reduce main bundle size
+let pdfFontsModulePromise = null;
+const getPdfFontsModule = () => {
+  if (!pdfFontsModulePromise) pdfFontsModulePromise = import('../../utils/pdfFonts');
+  return pdfFontsModulePromise;
+};
+// Safe synchronous fallbacks until the module is loaded
+let setPdfFont = (doc, style = 'normal') => { try { doc.setFont(style === 'bold' ? 'helvetica' : 'helvetica'); } catch (e) {} };
+let getAutoTableStyles = () => ({ font: 'helvetica' });
 import NumericInput from '../../components/NumericInput/NumericInput';
 import '../../pages/Checkout/Checkout.css';
 import 'jspdf-autotable';
-import JsBarcode from 'jsbarcode';
+import { generateBarcodeDataUrl } from '../../utils/barcode';
+import { renderDocHeader, renderInvoiceTemplate } from '../../utils/pdfTemplates/invoiceTemplate';
 
 const { ipcRenderer } = window.require ? window.require('electron') : { ipcRenderer: null };
 
-const generateBarcodeDataUrl = (text, options = {}) => {
-  try {
-    const canvas = document.createElement('canvas');
-    JsBarcode(canvas, String(text), { format: 'CODE128', displayValue: true, height: 40, margin: 0, ...options });
-    return canvas.toDataURL('image/png');
-  } catch (e) {
-    console.warn('Barcode generation failed', e);
-    return null;
-  }
-};
 
 const DOCUMENT_TYPES = [
   { value: 'devis', label: 'SalesByInvoices.quotation' },
@@ -58,6 +57,9 @@ const initialFormData = {
   clientAddress: '',
   clientEmail: '',
   clientPhone: '',
+  clientRC: '',
+  clientAI: '',
+  clientNIS: '',
   date: new Date().toISOString().slice(0, 10),
   productName: '',
   serialNumber: '',
@@ -68,6 +70,9 @@ const initialFormData = {
   companyAddress: '',
   companyContact: '',
   companyTaxId: '',
+  companyRC: '',
+  companyAI: '',
+  companyNIS: '',
   linkedDocId: '', // for workflow
 };
 
@@ -112,14 +117,13 @@ const SalesByInvoices = () => {
       companyAddress: settings.shopAddress || '',
       companyContact: settings.phone1 || settings.email || '',
       companyTaxId: settings.taxId || '',
+      companyRC: settings.rc || '',
+      companyAI: settings.ai || '',
+      companyNIS: settings.nis || '',
       paymentTerms: settings.paymentTerms || '',
     }));
   }, [settings]);
 
-  // Persist docType, formData, garantieDuration to localStorage
-  useEffect(() => {
-    localStorage.setItem('docGenDocType', docType);
-  }, [docType]);
   useEffect(() => {
     localStorage.setItem('docGenFormData', JSON.stringify(formData));
   }, [formData]);
@@ -254,9 +258,21 @@ const SalesByInvoices = () => {
   // Manual Montant (amount) item modal for barcodes without product or quick manual add
   const [showManualItemModal, setShowManualItemModal] = useState(false);
   const [manualItemData, setManualItemData] = useState({ name: '', price: '', quantity: '1', quantityType: 'unit' });
+  // Quick product search inside the manual-add modal (match by name or `reference`/SKU)
+  const [manualProductQuery, setManualProductQuery] = useState('');
+  const manualProductResults = manualProductQuery.trim().length > 0
+    ? products.filter(p => ((p.name || '').toLowerCase().includes(manualProductQuery.toLowerCase()) || (p.reference || '').toLowerCase().includes(manualProductQuery.toLowerCase()))).slice(0, 8)
+    : [];
+  const selectManualProduct = (p) => {
+    setManualItemData(fd => ({ ...fd, name: p.name || fd.name, price: (p.price || p.detailPrice || p.wholesalePrice || 0), _linkedProductId: p.id, productName: p.name }));
+    setManualProductQuery(p.name || '');
+    setTimeout(() => document.getElementById('sales-manual-amount-input')?.focus(), 50);
+  };
 
   const openManualItemModal = (prefill = {}) => {
     setManualItemData({ name: '', price: '', quantity: '1', quantityType: 'unit', ...prefill });
+    // if opening with a linked product, prefill the search box so user sees the selection
+    setManualProductQuery(prefill.productName || prefill.name || '');
     setShowManualItemModal(true);
     setTimeout(() => {
       barcodeInputRef.current?.blur();
@@ -266,6 +282,7 @@ const SalesByInvoices = () => {
   const closeManualItemModal = () => {
     setShowManualItemModal(false);
     setManualItemData({ name: '', price: '', quantity: '1', quantityType: 'unit' });
+    setManualProductQuery('');
     setTimeout(() => barcodeInputRef.current?.focus(), 100);
   };
 
@@ -331,7 +348,11 @@ const SalesByInvoices = () => {
           clientAddress: t.clientAddress || formData.clientAddress || '',
           clientEmail: t.clientEmail || formData.clientEmail || '',
           clientPhone: t.clientPhone || formData.clientPhone || '',
-          clientId: t.clientId || formData.clientId || ''
+          clientId: t.clientId || formData.clientId || '',
+          clientRC: t.clientRC || formData.clientRC || '',
+          clientAI: t.clientAI || formData.clientAI || '',
+          clientNIS: t.clientNIS || formData.clientNIS || '',
+          taxId: t.taxId || formData.taxId || ''
         }));
       } catch {
         // fallback
@@ -348,7 +369,11 @@ const SalesByInvoices = () => {
       clientAddress: formData.clientAddress || '',
       clientEmail: formData.clientEmail || '',
       clientPhone: formData.clientPhone || '',
-      clientId: formData.clientId || ''
+      clientId: formData.clientId || '',
+      clientRC: formData.clientRC || '',
+      clientAI: formData.clientAI || '',
+      clientNIS: formData.clientNIS || '',
+      taxId: formData.taxId || ''
     }];
   });
   const [activeTabId, setActiveTabId] = useState(() => {
@@ -402,7 +427,8 @@ const SalesByInvoices = () => {
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [receiptData, setReceiptData] = useState(null);
   const [debtAmount, setDebtAmount] = useState(0);
-  const [paidAmount, setPaidAmount] = useState(0);
+  // paidAmount is optional (string) so user may leave it blank; parsed where needed
+  const [paidAmount, setPaidAmount] = useState('');
 
   // Location state
   const [locations, setLocations] = useState([]);
@@ -516,7 +542,7 @@ const SalesByInvoices = () => {
     const { name, value } = e.target;
 
     // If editing a client-related field, update both formData and the active tab so each checkout keeps its own client
-    const clientFields = ['clientName', 'clientAddress', 'clientEmail', 'clientPhone', 'clientId'];
+    const clientFields = ['clientName', 'clientAddress', 'clientEmail', 'clientPhone', 'clientId', 'clientRC', 'clientAI', 'clientNIS', 'taxId'];
     if (clientFields.includes(name)) {
       setFormData(fd => ({ ...fd, [name]: value }));
       setTabs(prev => prev.map(tab => tab.id === activeTabId ? { ...tab, [name]: value } : tab));
@@ -574,6 +600,40 @@ const SalesByInvoices = () => {
       setBarcode('');
     }
   };
+
+  // When Enter is pressed while barcode input has focus:
+  // - if barcode field has text => submit barcode (existing behavior)
+  // - if barcode field is empty => open qty editor for the last product added
+  const handleBarcodeKeyDown = (e) => {
+    if (e.key !== 'Enter') return;
+    const code = (barcode || '').trim();
+
+    if (code) {
+      e.preventDefault();
+      handleBarcodeSubmit(code);
+      return;
+    }
+
+    // No barcode typed — open quantity editor for last item
+    const currentCart = activeTab?.cart || [];
+    if (!currentCart || currentCart.length === 0) return; // nothing to edit
+
+    e.preventDefault();
+    const lastIndex = currentCart.length - 1;
+    const lastItem = currentCart[lastIndex];
+
+    setSelectedItemIndex(lastIndex);
+    setEditingItemId(lastItem.id);
+    setEditingQuantity(String(lastItem.quantity || 1));
+
+    // focus the quantity input when it renders
+    setTimeout(() => {
+      if (quantityInputRef.current) {
+        try { quantityInputRef.current.focus(); quantityInputRef.current.select && quantityInputRef.current.select(); } catch (err) {}
+      }
+    }, 50);
+  };
+
   // Keyboard shortcuts (Checkout parity: Enter to edit qty, show unit)
   useEffect(() => {
     const handleKeyPress = (e) => {
@@ -627,7 +687,10 @@ const SalesByInvoices = () => {
         e.preventDefault();
         setEditingItemId(cart[selectedItemIndex].id);
         setEditingQuantity(cart[selectedItemIndex].quantity.toString());
-        setTimeout(() => quantityInputRef.current?.focus(), 100);
+        setTimeout(() => {
+          const el = quantityInputRef.current;
+          if (el) { el.focus(); if (el.select) el.select(); }
+        }, 100);
       }
     };
     window.addEventListener('keydown', handleKeyPress);
@@ -696,7 +759,7 @@ const SalesByInvoices = () => {
   const clearCart = () => {
     setTabs(prev => prev.map(tab =>
       tab.id === activeTabId
-        ? { ...tab, cart: [], clientName: '', clientAddress: '', clientEmail: '', clientPhone: '', clientId: '' }
+        ? { ...tab, cart: [], clientName: '', clientAddress: '', clientEmail: '', clientPhone: '', clientId: '', clientRC: '', clientAI: '', clientNIS: '', taxId: '' }
         : tab
     ));
     setBarcode('');
@@ -707,9 +770,14 @@ const SalesByInvoices = () => {
       clientAddress: '',
       clientEmail: '',
       clientPhone: '',
-      clientId: ''
+      clientId: '',
+      clientRC: '',
+      clientAI: '',
+      clientNIS: '',
+      taxId: ''
     }));
   };
+
 
   const addNewTab = () => {
     const newTab = {
@@ -724,13 +792,17 @@ const SalesByInvoices = () => {
       clientAddress: '',
       clientEmail: '',
       clientPhone: '',
-      clientId: ''
+      clientId: '',
+      clientRC: '',
+      clientAI: '',
+      clientNIS: '',
+      taxId: ''
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(nextTabId);
     setNextTabId(nextTabId + 1);
     // Reset visible form fields for the new tab
-    setFormData(fd => ({ ...fd, clientName: '', clientAddress: '', clientEmail: '', clientPhone: '', clientId: '' }));
+    setFormData(fd => ({ ...fd, clientName: '', clientAddress: '', clientEmail: '', clientPhone: '', clientId: '', clientRC: '', clientAI: '', clientNIS: '', taxId: '' }));
   };
 
   const closeTab = (tabId) => {
@@ -750,7 +822,7 @@ const SalesByInvoices = () => {
     // Load the tab-specific client info into the form immediately
     const target = tabs.find(t => t.id === tabId);
     if (target) {
-      setFormData(fd => ({ ...fd, clientName: target.clientName || '', clientAddress: target.clientAddress || '', clientEmail: target.clientEmail || '', clientPhone: target.clientPhone || '', clientId: target.clientId || '' }));
+      setFormData(fd => ({ ...fd, clientName: target.clientName || '', clientAddress: target.clientAddress || '', clientEmail: target.clientEmail || '', clientPhone: target.clientPhone || '', clientId: target.clientId || '', clientRC: target.clientRC || '', clientAI: target.clientAI || '', clientNIS: target.clientNIS || '', taxId: target.taxId || '' }));
     }
     setTimeout(() => barcodeInputRef.current?.focus(), 100);
   };
@@ -758,10 +830,25 @@ const SalesByInvoices = () => {
 
   // Totals for active tab
   const subtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  // `discount` remains numeric for calculations; `discountInput` keeps the raw text while the user types
   const [discount, setDiscount] = useState(0);
+  const [discountInput, setDiscountInput] = useState(() => (0).toFixed(2));
+
+  // Keep numeric discount in sync with default rate changes
   useEffect(() => {
     setDiscount(subtotal * (settings.discountRate / 100));
   }, [subtotal, settings.discountRate]);
+
+  // Mirror numeric discount to the edit buffer unless the user is currently editing the field
+  useEffect(() => {
+    try {
+      const activeIsDiscount = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('discount-input');
+      if (!activeIsDiscount) setDiscountInput((discount || 0).toFixed(2));
+    } catch (e) {
+      setDiscountInput((discount || 0).toFixed(2));
+    }
+  }, [discount]);
+
   const afterDiscount = subtotal - discount;
   const tax = afterDiscount * (settings.taxRate / 100);
   const total = afterDiscount + tax;
@@ -790,49 +877,52 @@ const SalesByInvoices = () => {
 
     const doc = new jsPDF();
     
-    // Load Unicode fonts for multi-language support
-    await loadPdfFonts(doc);
+    // Load Unicode fonts for multi-language support (dynamically import the font utilities)
+    const pdfFontsModule = await getPdfFontsModule();
+    if (pdfFontsModule && pdfFontsModule.loadPdfFonts) {
+      await pdfFontsModule.loadPdfFonts(doc, i18n.language);
+      // Replace local helpers with real implementations for synchronous use later
+      setPdfFont = pdfFontsModule.setPdfFont || setPdfFont;
+      // Wrap getAutoTableStyles so it defaults to the current document direction (isRTL)
+      getAutoTableStyles = (rtl = isRTL) => (pdfFontsModule.getAutoTableStyles ? pdfFontsModule.getAutoTableStyles(rtl) : { font: 'helvetica', halign: rtl ? 'right' : 'left' });
+    } else {
+      // Fallback to basic font if import fails
+      setPdfFont(doc, 'normal');
+    }
     // Ensure font is set for all text
     setPdfFont(doc, 'normal');
-    
-    const noir = [0, 0, 0];
-    const beige = [245, 240, 230];
-    // Header: left logo/date, right title/number, then line
-    doc.setFillColor(...beige);
-    doc.rect(0, 0, 210, 38, 'F');
-    let logo = settings.posLogo || formData.logo;
-    if (logo) {
-      try {
-        // Increased default logo size and preserve aspect ratio
-        let maxDim = 48; // mm
-        let width = maxDim;
-        let height = maxDim;
-        if (logo.startsWith('data:image')) {
-          const img = document.createElement('img');
-          img.src = logo;
-          if (img.complete && img.naturalWidth && img.naturalHeight) {
-            const aspect = img.naturalWidth / img.naturalHeight;
-            if (aspect >= 1) {
-              width = Math.min(maxDim, maxDim);
-              height = Math.round(width / aspect);
-            } else {
-              height = Math.min(maxDim, maxDim);
-              width = Math.round(height * aspect);
-            }
-          }
-        }
-        doc.addImage(logo, 'PNG', 10, 6, width, height, undefined, 'FAST');
-      } catch (e) {}
+
+    // Mirror drawing/text coordinates and default alignment when RTL
+    const _pageWidth = doc.internal.pageSize.getWidth();
+    if (isRTL) {
+      const _origText = doc.text.bind(doc);
+      doc.text = function(text, x, y, options) {
+        // keep center alignment unchanged
+        const opts = options || {};
+        if (opts.align === 'center' || typeof x !== 'number') return _origText(text, x, y, opts);
+        // flip x coordinate
+        const mx = _pageWidth - x;
+        // if explicit align provided, flip left<->right; otherwise default to right for RTL
+        if (opts.align === 'left') opts.align = 'right';
+        else if (opts.align === 'right') opts.align = 'left';
+        else if (!opts.align) opts.align = 'right';
+        return _origText(text, mx, y, opts);
+      };
+
+      const _origRect = doc.rect.bind(doc);
+      doc.rect = function(x, y, w, h, style) {
+        if (typeof x === 'number' && x !== 0) return _origRect(_pageWidth - x - w, y, w, h, style);
+        return _origRect(x, y, w, h, style);
+      };
     }
-    doc.setFontSize(10);
-    doc.setTextColor(...noir);
-    // Format date as DD-MM-YYYY
+    
+    // Standardized header (logo / title / number / date)
     const formatDate = (dateStr) => {
       if (!dateStr) return '';
       const [year, month, day] = dateStr.split('-');
       return `${day}-${month}-${year}`;
     };
-    doc.text(`${t('Date')}: ${formatDate(formData.date)}`, 14, 33);
+
     let title = '';
     if (docType === 'facture') title = t('SalesByInvoices.invoice');
     else if (docType === 'bon_commande') title = t('SalesByInvoices.purchaseOrder');
@@ -841,21 +931,16 @@ const SalesByInvoices = () => {
     else if (docType === 'proforma') title = t('SalesByInvoices.proforma');
     else if (docType === 'garantie') title = t('SalesByInvoices.garantie');
     else title = t('SalesByInvoices.document');
-    // Dynamically adjust font size for long titles
-    let titleFontSize = 28;
-    const maxTitleWidth = 80; // mm, max width allowed for title
-    doc.setFontSize(titleFontSize);
-    setPdfFont(doc, 'bold');
-    let titleWidth = doc.getTextWidth(title.toUpperCase());
-    while (titleWidth > maxTitleWidth && titleFontSize > 12) {
-      titleFontSize -= 2;
-      doc.setFontSize(titleFontSize);
-      titleWidth = doc.getTextWidth(title.toUpperCase());
-    }
-    doc.text(title.toUpperCase(), 120, 20, { align: 'left' });
-    doc.setFontSize(9);
-    setPdfFont(doc, 'normal');
-    doc.text(`${t('SalesByInvoices.documentNo')}: ${docNumber}`, 120, 28, { align: 'left' });
+
+    renderDocHeader(doc, {
+      title,
+      docNumber,
+      date: formatDate(formData.date),
+      company: formData,
+      logo: settings.posLogo || formData.logo,
+      isRTL,
+      t
+    });
     // Draw line below header
   
 
@@ -891,9 +976,12 @@ const SalesByInvoices = () => {
     });
     
     if (formData.companyTaxId) {
-      doc.text(`${t('SalesByInvoices.taxId')}: ${formData.companyTaxId}`, 10, yPos);
+      doc.text(`${t('settings.taxId')}: ${formData.companyTaxId}`, 10, yPos);
       yPos += 6;
     }
+    if (formData.companyRC) { doc.text(`${t('settings.rcShort') || 'RC'}: ${formData.companyRC}`, 10, yPos); yPos += 6; }
+    if (formData.companyAI) { doc.text(`${t('settings.aiShort') || 'AI'}: ${formData.companyAI}`, 10, yPos); yPos += 6; }
+    if (formData.companyNIS) { doc.text(`${t('settings.nisShort') || 'NIS'}: ${formData.companyNIS}`, 10, yPos); yPos += 6; }
     if (formData.paymentTerms) {
       const paymentTermsLines = doc.splitTextToSize(`${t('SalesByInvoices.paymentTerms')}: ${formData.paymentTerms}`, 90);
       paymentTermsLines.forEach(line => {
@@ -926,11 +1014,16 @@ const SalesByInvoices = () => {
         clientYPos += 6;
       });
     }
+
+    if (formData.taxId) { doc.text(`${t('settings.taxId')}: ${formData.taxId}`, 120, clientYPos); clientYPos += 6; }
     
     if (formData.clientPhone) {
       doc.text(`${t('SalesByInvoices.phone')}: ${formData.clientPhone}`, 120, clientYPos);
       clientYPos += 6;
     }
+    if (formData.clientRC) { doc.text(`${t('settings.rcShort') || 'RC'}: ${formData.clientRC}`, 120, clientYPos); clientYPos += 6; }
+    if (formData.clientAI) { doc.text(`${t('settings.aiShort') || 'AI'}: ${formData.clientAI}`, 120, clientYPos); clientYPos += 6; }
+    if (formData.clientNIS) { doc.text(`${t('settings.nisShort') || 'NIS'}: ${formData.clientNIS}`, 120, clientYPos); clientYPos += 6; }
     setPdfFont(doc, 'normal');
 
     // Calculate dynamic start position for table (after all text)
@@ -938,83 +1031,45 @@ const SalesByInvoices = () => {
 
     // --- Document Type Specific Sections ---
     if (docType === 'devis') {
-      // Quotation: details, validity, terms
-      autoTable(doc, {
-        startY: tableStartY,
-        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-        body: cart.map(item => {
-          const prod = products.find(p => p.id === item.id);
-          const unit = prod?.quantityType || 'unit';
-          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
-          const priceWithType = `${item.price} ${settings.currency || '€'}`;
-          return [
-            item.name,
-            quantityWithUnit,
-            priceWithType,
-            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
-          ];
-        }),
-        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-        bodyStyles: { halign: 'center' },
-        columnStyles: {
-          0: { cellWidth: 80, halign: 'left' },
-          1: { cellWidth: 30 },
-          2: { cellWidth: 35 },
-          3: { cellWidth: 35 }
-        },
-        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+      // Quotation: centralized layout
+      renderInvoiceTemplate(doc, {
+        items: cart,
+        company: formData,
+        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
+        title,
+        docNumber,
+        date: formatDate(formData.date),
+        totals: { subtotal, discount, tax, total },
+        currency: settings.currency || '€',
+        t,
+        isRTL,
+        showPrices: true
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.setFontSize(10);
-      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
-      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
-      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
-      setPdfFont(doc, 'bold');
-      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
-      setPdfFont(doc, 'normal');
-      doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(formData.date)}`, 15, finalY + 32);
-      doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 40);
-      doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 48);
+      doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(formData.date)}`, 15, finalY + 8);
+      doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 16);
+      doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 24);
     } else if (docType === 'bon_commande') {
-      // Purchase Order: details, link to quotation, confirmation
-      autoTable(doc, {
-        startY: tableStartY,
-        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-        body: cart.map(item => {
-          const prod = products.find(p => p.id === item.id);
-          const unit = prod?.quantityType || 'unit';
-          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
-          const priceWithType = `${item.price} ${settings.currency || '€'}`;
-          return [
-            item.name,
-            quantityWithUnit,
-            priceWithType,
-            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
-          ];
-        }),
-        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-        bodyStyles: { halign: 'center' },
-        columnStyles: {
-          0: { cellWidth: 80, halign: 'left' },
-          1: { cellWidth: 30 },
-          2: { cellWidth: 35 },
-          3: { cellWidth: 35 }
-        },
-        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+      // Purchase Order (centralized layout)
+      renderInvoiceTemplate(doc, {
+        items: cart,
+        company: formData,
+        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
+        title,
+        docNumber,
+        date: formatDate(formData.date),
+        totals: { subtotal, discount, tax, total },
+        currency: settings.currency || '€',
+        t,
+        isRTL,
+        showPrices: true
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.setFontSize(10);
-      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
-      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
-      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
-      setPdfFont(doc, 'bold');
-      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
-      setPdfFont(doc, 'normal');
-      if (linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + linkedQuotation, 15, finalY + 32);
-      doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(formData.date)}`, 15, finalY + 40);
-      doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 48);
-      doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 56);
-      doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 64);
+      if (linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + linkedQuotation, 15, finalY + 8);
+      doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(formData.date)}`, 15, finalY + 16);
+      doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 24);
+      doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 32);
+      doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 40);
     } else if (docType === 'bon_livraison') {
       // Delivery Note: no prices, link to PO, delivery address, signature
       autoTable(doc, {
@@ -1024,7 +1079,7 @@ const SalesByInvoices = () => {
         headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
         bodyStyles: { halign: 'center' },
         columnStyles: {
-          0: { cellWidth: 130, halign: 'left' },
+          0: { cellWidth: 130, halign: isRTL ? 'right' : 'left' },
           1: { cellWidth: 40 }
         },
         styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
@@ -1037,83 +1092,43 @@ const SalesByInvoices = () => {
       doc.rect(15, finalY + 28, 60, 25);
       doc.text(t('SalesByInvoices.deliveryNoteInfo'), 15, finalY + 60);
     } else if (docType === 'facture') {
-      // Invoice: all details, reference, payment, legal info
-      autoTable(doc, {
-        startY: tableStartY,
-        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-        body: cart.map(item => {
-          const prod = products.find(p => p.id === item.id);
-          const unit = prod?.quantityType || 'unit';
-          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
-          const priceWithType = `${item.price} ${settings.currency || '€'}`;
-          return [
-            item.name,
-            quantityWithUnit,
-            priceWithType,
-            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
-          ];
-        }),
-        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-        bodyStyles: { halign: 'center' },
-        columnStyles: {
-          0: { cellWidth: 80, halign: 'left' },
-          1: { cellWidth: 30 },
-          2: { cellWidth: 35 },
-          3: { cellWidth: 35 }
-        },
-        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+      // Invoice: use centralized spreadsheet-style renderer
+      renderInvoiceTemplate(doc, {
+        items: cart,
+        company: formData,
+        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone, rc: formData.clientRC, ai: formData.clientAI, nis: formData.clientNIS },
+        title,
+        docNumber,
+        date: formatDate(formData.date),
+        totals: { subtotal, discount, tax, total },
+        currency: settings.currency || '€',
+        t,
+        isRTL,
+        showPrices: true,
+        paymentInfo: { paymentMethod: selectedPaymentMethod, dueDate: formatDate(formData.date), paymentStatus: formData.paymentStatus }
       });
+
+      // linked references / legal note (kept beneath rendered template)
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.setFontSize(10);
-      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
-      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
-      doc.text(`${t('invoiceHistory.tax')} (${settings.taxRate || 0}%) : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
-      setPdfFont(doc, 'bold');
-      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
-      setPdfFont(doc, 'normal');
-      if (linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + linkedDelivery, 15, finalY + 32);
-      doc.text(`${t('SalesByInvoices.paymentMethod')} : ${selectedPaymentMethod}`, 15, finalY + 40);
-      doc.text(`${t('SalesByInvoices.dueDate')} : ${formatDate(formData.date)}`, 15, finalY + 48);
-      // Fix: define statusLabel before using
-      let statusLabel = (typeof paymentStatusOptions !== 'undefined' && paymentStatusOptions.find(opt => opt.value === formData.paymentStatus)?.label) || formData.paymentStatus;
-      doc.text(`${t('SalesByInvoices.paymentStatus')} : ${statusLabel}`, 15, finalY + 56);
-      doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 64);
+      if (linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + linkedDelivery, 15, finalY + 8);
+      doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 16);
     } else if (docType === 'proforma') {
-      // Proforma Invoice: like invoice, but marked and not for accounting
-      autoTable(doc, {
-        startY: tableStartY,
-        head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-        body: cart.map(item => {
-          const prod = products.find(p => p.id === item.id);
-          const unit = prod?.quantityType || 'unit';
-          const quantityWithUnit = unit && unit !== 'unit' ? `${item.quantity} ${unit}` : `${item.quantity}`;
-          const priceWithType = `${item.price} ${settings.currency || '€'}`;
-          return [
-            item.name,
-            quantityWithUnit,
-            priceWithType,
-            `${(item.price * item.quantity).toFixed(2)} ${settings.currency || '€'}`
-          ];
-        }),
-        headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-        bodyStyles: { halign: 'center' },
-        columnStyles: {
-          0: { cellWidth: 80, halign: 'left' },
-          1: { cellWidth: 30 },
-          2: { cellWidth: 35 },
-          3: { cellWidth: 35 }
-        },
-        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+      // Proforma: centralized template but annotated as proforma
+      renderInvoiceTemplate(doc, {
+        items: cart,
+        company: formData,
+        client: { name: formData.clientName, address: formData.clientAddress, email: formData.clientEmail, phone: formData.clientPhone },
+        title,
+        docNumber,
+        date: formatDate(formData.date),
+        totals: { subtotal, discount, tax, total },
+        currency: settings.currency || '€',
+        t,
+        isRTL,
+        showPrices: true
       });
       const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-      doc.setFontSize(10);
-      doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${settings.currency || '€'}`, 140, finalY);
-      doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 8);
-      doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 16);
-      setPdfFont(doc, 'bold');
-      doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${settings.currency || '€'}`, 140, finalY + 24);
-      setPdfFont(doc, 'normal');
-      doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 42);
+      doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 8);
     } else if (docType === 'garantie') {
       // Garantie: special layout
       doc.setFontSize(12);
@@ -1158,7 +1173,15 @@ const SalesByInvoices = () => {
       doc.text(t('SalesByInvoices.clientSignature') + ' :', 130, garantieYPos - 5);
       doc.rect(130, garantieYPos, 60, 25);
       doc.setFontSize(9);
-      doc.text((formData.companyName || 'POS') + ' – ' + t('SalesByInvoices.thankYou'), 60, 285);
+      // position thank-you above the bottom barcode to avoid overlap on small/letter pages
+      const _pageHeight = doc.internal.pageSize.getHeight();
+      const _barcodeH = 12; // mm (matches barcode below)
+      const _marginBottom = 14; // mm
+      const _barcodeTopY = _pageHeight - _marginBottom - _barcodeH;
+      const _defaultThankYouY = 285;
+      const thankYouY = Math.min(_defaultThankYouY, _barcodeTopY - 6);
+      const _pageWidthCenter = doc.internal.pageSize.getWidth();
+      doc.text((formData.companyName || 'POS') + ' – ' + t('SalesByInvoices.thankYou'), _pageWidthCenter / 2, thankYouY, { align: 'center' });
     } else {
       // Fallback: generic table
       autoTable(doc, {
@@ -1168,12 +1191,12 @@ const SalesByInvoices = () => {
         headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
         bodyStyles: { halign: 'center' },
         columnStyles: {
-          0: { cellWidth: 80, halign: 'left' },
+          0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
           1: { cellWidth: 35 },
           2: { cellWidth: 30 },
           3: { cellWidth: 35 }
         },
-        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+        styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles(isRTL) }
       });
     }
     // Add small barcode at bottom center of page (avoid overlap)
@@ -1241,7 +1264,15 @@ const SalesByInvoices = () => {
       clientAddress: formData.clientAddress,
       clientEmail: formData.clientEmail,
       clientPhone: formData.clientPhone,
-      date: formData.date || new Date().toISOString(),
+      clientRC: formData.clientRC || '',
+      clientAI: formData.clientAI || '',
+      clientNIS: formData.clientNIS || '',
+      clientTaxId: formData.taxId || '',
+      // If the form holds a date-only string (YYYY-MM-DD) we combine it with the current time so
+      // the stored invoice `date` contains a full timestamp (prevents showing 01:00 AM due to UTC-only date parsing).
+      date: (formData.date && /^\d{4}-\d{2}-\d{2}$/.test(formData.date))
+        ? new Date(`${formData.date}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`).toISOString()
+        : (formData.date || new Date().toISOString()),
       subtotal,
       discount,
       tax,
@@ -1262,6 +1293,9 @@ const SalesByInvoices = () => {
       companyAddress: formData.companyAddress,
       companyContact: formData.companyContact,
       companyTaxId: formData.companyTaxId,
+      companyRC: formData.companyRC || '',
+      companyAI: formData.companyAI || '',
+      companyNIS: formData.companyNIS || '',
     };
     // Helper: ensure client exists in 'clients' table and return client id
     const ensureClientExists = async () => {
@@ -1311,7 +1345,16 @@ const SalesByInvoices = () => {
 
         // No existing client found — create one if we have minimal info
         if (byName || byEmail || byPhone) {
-          const newClient = { name: byName || (byEmail ? byEmail : 'Client'), phone: byPhone || null, email: byEmail || null, address: formData.clientAddress || null };
+          const newClient = {
+            name: byName || (byEmail ? byEmail : 'Client'),
+            phone: byPhone || null,
+            email: byEmail || null,
+            address: formData.clientAddress || null,
+            taxId: formData.taxId || null,
+            rc: formData.clientRC || null,
+            ai: formData.clientAI || null,
+            nis: formData.clientNIS || null
+          };
           const cr = await createClient(newClient);
           const created = cr && (cr.data || cr) ? (cr.data || cr) : null;
           if (created && created.id) {
@@ -1372,9 +1415,21 @@ const SalesByInvoices = () => {
         result = await createSupplierInvoice(docToSave);
       }
       // Notify InvoiceHistory to refresh (custom event)
-      if (result && result.success) {
+      const savedOk = !!(result && (result.success || result.id || (result.data && (result.data.id || result.data.invoiceNumber))));
+      if (savedOk) {
+        // attempt to normalize saved invoice object
+        const savedInvoice = (result && result.data) ? result.data : (result && result.id) ? result : null;
         window.dispatchEvent(new Event('invoice-history-refresh'));
+        // also broadcast the saved invoice so InvoiceHistory can select it automatically
+        try { window.dispatchEvent(new CustomEvent('invoice-saved', { detail: savedInvoice })); } catch(e) { /* ignore */ }
         setNotification({ message: t('SalesByInvoices.saveSuccess'), type: 'success' });
+        // DEBUG: log saved invoice and refresh DB snapshot for troubleshooting
+        try {
+          const dbg = await getAllInvoices();
+          console.log('DEBUG: getAllInvoices() after save ->', dbg);
+        } catch (e) {
+          console.warn('DEBUG: failed to fetch all invoices after save', e);
+        }
       } else {
         // Log error and show notification for all failures
         console.error('Failed to save warranty certificate/invoice:', result);
@@ -1390,7 +1445,7 @@ const SalesByInvoices = () => {
   useEffect(() => {
     if (showPaymentModal) {
       const validTotal = total || 0;
-      setPaidAmount(validTotal);
+      setPaidAmount(String(validTotal)); // prefill but allow user to clear (optional)
       setDebtAmount(0);
     }
   }, [showPaymentModal, total]);
@@ -1413,15 +1468,26 @@ const SalesByInvoices = () => {
   // Handle print receipt (like Checkout)
   const handlePrintReceipt = () => {
     if (ipcRenderer && receiptData) {
-      ipcRenderer.send('print-receipt', {
+      const payload = {
         items: receiptData.items,
         subtotal: receiptData.subtotal,
         tax: receiptData.tax,
         discount: receiptData.discount,
         total: receiptData.total,
-        date: receiptData.date
+        date: receiptData.date,
+        debt: receiptData.debt || 0,
+        paid: receiptData.paid || 0,
+        paymentStatus: receiptData.paymentStatus || 'paid',
+        printerName: settings.receiptPrinter || undefined,
+        showDialog: !!settings.printDialogOnPrint
+      };
+
+      ipcRenderer.once('print-result', (ev, result) => {
+        if (result && result.success) showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+        else showNotification((result && result.error) || t('checkout.printFailed') || 'Print failed', 'error');
       });
-      showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+
+      ipcRenderer.send('print-receipt', payload);
     }
     setShowReceiptPreview(false);
     setReceiptData(null);
@@ -1453,7 +1519,7 @@ const SalesByInvoices = () => {
       total,
       paymentMethod: selectedPaymentMethod,
       debt: debtAmount,
-      paid: paidAmount,
+      paid: parseFloat(paidAmount) || 0,
       items: cart.map(item => ({
         // Use real product id when available (linked manual items set item.productId); pure manual items have null productId
         productId: item.productId || (typeof item.id === 'string' && item.id.startsWith('manual-') ? null : item.id),
@@ -1468,6 +1534,10 @@ const SalesByInvoices = () => {
       clientAddress: formData.clientAddress,
       clientEmail: formData.clientEmail,
       clientPhone: formData.clientPhone,
+      clientRC: formData.clientRC || '',
+      clientAI: formData.clientAI || '',
+      clientNIS: formData.clientNIS || '',
+      clientTaxId: formData.taxId || '',
       paymentStatus: debtAmount > 0 ? 'partial' : 'paid'
     };
     
@@ -1481,9 +1551,10 @@ const SalesByInvoices = () => {
 
     // Save invoice to database (this also updates product quantities automatically)
     const result = await createInvoice(invoiceData);
+    const savedOk = !!(result && (result.success || result.id || (result.data && (result.data.id || result.data.invoiceNumber))));
     
     // Update location quantities for items linked to real products only
-    if (result.success && ipcRenderer && selectedLocationId) {
+    if (savedOk && ipcRenderer && selectedLocationId) {
       try {
         for (const item of cart) {
           const productId = item.productId || (typeof item.id === 'string' && item.id.startsWith('manual-') ? null : item.id);
@@ -1504,7 +1575,7 @@ const SalesByInvoices = () => {
       }
     }
     
-    if (result.success) {
+    if (savedOk) {
       // Check which products are now out of stock (skip manual items)
       const outOfStockProducts = [];
       for (const item of cart) {
@@ -1525,18 +1596,28 @@ const SalesByInvoices = () => {
         setProducts(productsResult.data);
       }
     
+      // Recompute totals from cart to ensure values are accurate for the receipt
+      const computedSubtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+      const computedDiscount = computedSubtotal * (settings.discountRate / 100);
+      const computedAfterDiscount = computedSubtotal - computedDiscount;
+      const computedTax = computedAfterDiscount * (settings.taxRate / 100);
+      const computedTotal = computedAfterDiscount + computedTax;
+
       // Prepare receipt data for preview (like Checkout)
       const receipt = {
         invoiceNumber,
         items: cart.map(item => ({...item})),
-        subtotal,
-        discount,
-        tax,
-        total,
+        subtotal: computedSubtotal,
+        discount: computedDiscount,
+        tax: computedTax,
+        total: computedTotal,
         paymentMethod: selectedPaymentMethod,
-        date: new Date().toLocaleString()
+        date: new Date().toLocaleString(),
+        debt: debtAmount || 0,
+        paid: parseFloat(paidAmount) || 0,
+        paymentStatus: debtAmount > 0 ? 'partial' : 'paid'
       };
-      
+
       setReceiptData(receipt);
       
       // Clear cart after successful payment
@@ -1556,15 +1637,26 @@ const SalesByInvoices = () => {
       
       // Automatically print receipt (skip preview modal)
       if (ipcRenderer) {
-        ipcRenderer.send('print-receipt', {
+        const payload = {
           items: receipt.items,
           subtotal: receipt.subtotal,
           tax: receipt.tax,
           discount: receipt.discount,
           total: receipt.total,
-          date: receipt.date
+          date: receipt.date,
+          debt: receipt.debt || 0,
+          paid: receipt.paid || 0,
+          paymentStatus: receipt.paymentStatus || (receipt.debt && receipt.debt > 0 ? 'partial' : 'paid'),
+          printerName: settings.receiptPrinter || undefined,
+          showDialog: !!settings.printDialogOnPrint
+        };
+
+        ipcRenderer.once('print-result', (ev, result) => {
+          if (result && result.success) showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+          else showNotification((result && result.error) || t('checkout.printFailed') || 'Print failed', 'error');
         });
-        showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+
+        ipcRenderer.send('print-receipt', payload);
       }
     } else {
       showNotification(t('SalesByInvoices.paymentFailed') || 'Payment failed! Please try again.', 'error');
@@ -1656,7 +1748,7 @@ const SalesByInvoices = () => {
                 placeholder={t('SalesByInvoices.scanOrEnterBarcode')}
                 value={barcode}
                 onChange={(e) => setBarcode(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleBarcodeSubmit()}
+                onKeyDown={handleBarcodeKeyDown}
                 autoFocus
                 style={{ width: '100%' }}
               />
@@ -1675,6 +1767,7 @@ const SalesByInvoices = () => {
                 <p>🛒 {t('SalesByInvoices.noProductsAdded')}</p>
               </div>
             ) : (
+              
               cart.map((item, index) => (
                 <div
                   key={item.id}
@@ -1689,7 +1782,17 @@ const SalesByInvoices = () => {
                       }));
                     }
                   }}
+                  onDoubleClick={() => {
+                    setSelectedItemIndex(index);
+                    setEditingItemId(item.id);
+                    setEditingQuantity(item.quantity.toString());
+                    setTimeout(() => {
+                      const el = quantityInputRef.current;
+                      if (el) { el.focus(); if (el.select) el.select(); }
+                    }, 100);
+                  }}
                 >
+
                   <div className="item-info">
                     <h3 className="item-name">
                       {item.name}
@@ -1846,14 +1949,25 @@ const SalesByInvoices = () => {
                 <span className="total-value discount-editable">
                   <NumericInput
                     className="discount-input"
-                    value={discount.toFixed(2)}
+                    value={discountInput}
                     onChange={e => {
-                      let newDiscount = parseFloat(e.target.value) || 0;
-                      if (newDiscount > subtotal) newDiscount = subtotal;
-                      if (newDiscount < 0) newDiscount = 0;
-                      setDiscount(newDiscount);
+                      const raw = String(e.target.value);
+                      // keep raw text so user can type partial decimals like "0." or use comma
+                      setDiscountInput(raw);
+                      const normalized = raw.replace(',', '.');
+                      const parsed = parseFloat(normalized);
+                      if (!Number.isNaN(parsed)) {
+                        let newDiscount = parsed;
+                        if (newDiscount > subtotal) newDiscount = subtotal;
+                        if (newDiscount < 0) newDiscount = 0;
+                        setDiscount(newDiscount);
+                      } else if (raw.trim() === '') {
+                        // empty input should be treated as zero
+                        setDiscount(0);
+                      }
                     }}
                     onFocus={e => e.target.select()}
+                    onBlur={() => setDiscountInput((discount || 0).toFixed(2))}
                     step="0.01"
                     min="0"
                     max={subtotal}
@@ -1927,9 +2041,22 @@ const SalesByInvoices = () => {
             </label>
             {/* Issuer/company info (read-only) */}
             {/* Company Name, Address, and Contact are hidden on Sales by invoices page as requested */}
+            {/* Company Tax ID is managed in Settings and not shown here */}
             <label>
-              {t('SalesByInvoices.taxId')}
-              <input name="companyTaxId" value={formData.companyTaxId} readOnly />
+              {t('settings.taxId')}
+              <input name="taxId" value={formData.taxId || ''} onChange={handleInputChange} placeholder={t('settings.taxIdPlaceholder') || ''} />
+            </label>
+            <label>
+              {'RC'}
+              <input name="clientRC" value={formData.clientRC || ''} onChange={handleInputChange} placeholder={t('settings.rcPlaceholder') || 'RC (optional)'} />
+            </label>
+            <label>
+              {t('settings.ai') || 'AI'}
+              <input name="clientAI" value={formData.clientAI || ''} onChange={handleInputChange} placeholder={t('settings.aiPlaceholder') || 'AI (optional)'} />
+            </label>
+            <label>
+              {t('settings.nis') || 'NIS'}
+              <input name="clientNIS" value={formData.clientNIS || ''} onChange={handleInputChange} placeholder={t('settings.nisPlaceholder') || 'NIS (optional)'} />
             </label>
             <label>
               {t('SalesByInvoices.paymentTerms')}
@@ -2075,84 +2202,121 @@ const SalesByInvoices = () => {
             </div>
           </div>
         </form>
-          {/* Payment Method Modal (like Checkout) */}
-          {showPaymentModal && (
-            <div className="modal-overlay" onClick={() => setShowPaymentModal(false)}>
-              <div className="modal-content payment-modal" onClick={e => e.stopPropagation()}>
-                <div className="modal-header">
-                  <h2>{t('SalesByInvoices.selectPaymentMethod')}</h2>
-                  <button className="modal-close" onClick={() => setShowPaymentModal(false)}>✕</button>
-                </div>
-                <div className="modal-body">
-                  <div className="payment-methods">
-                    {paymentMethods.map(method => (
-                      <button
-                        key={method}
-                        className={`payment-method-btn ${selectedPaymentMethod === method ? 'selected' : ''}`}
-                        onClick={() => setSelectedPaymentMethod(method)}
-                      >
-                        <span className="payment-icon">{method === 'cash' ? '💵' : method === 'other' ? '📱' : '💳'}</span>
-                        <span className="payment-label">{t('SalesByInvoices.' + method)}</span>
-                      </button>
-                    ))}
+           {showPaymentModal && (
+                  <div className="modal-overlay" onClick={() => setShowPaymentModal(false)}>
+                    <div className="modal-content payment-modal" onClick={(e) => e.stopPropagation()}>
+                      <div className="modal-header">
+                        <h2>{t('checkout.selectPaymentMethod')}</h2>
+                        <button className="modal-close" onClick={() => setShowPaymentModal(false)}>✕</button>
+                      </div>
+                      <div className="modal-body">
+                        <div className="payment-methods">
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'cash' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('cash')}
+                          >
+                            <span className="payment-icon">💵</span>
+                            <span className="payment-label">{t('checkout.cash')}</span>
+                          </button>
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'visa' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('visa')}
+                          >
+                            <span className="payment-icon">💳</span>
+                            <span className="payment-label">{t('checkout.visa')}</span>
+                          </button>
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'mastercard' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('mastercard')}
+                          >
+                            <span className="payment-icon">💳</span>
+                            <span className="payment-label">{t('checkout.mastercard')}</span>
+                          </button>
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'amex' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('amex')}
+                          >
+                            <span className="payment-icon">💳</span>
+                            <span className="payment-label">{t('checkout.amex')}</span>
+                          </button>
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'debit' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('debit')}
+                          >
+                            <span className="payment-icon">💳</span>
+                            <span className="payment-label">{t('checkout.debit')}</span>
+                          </button>
+                          <button
+                            className={`payment-method-btn ${selectedPaymentMethod === 'other' ? 'selected' : ''}`}
+                            onClick={() => setSelectedPaymentMethod('other')}
+                          >
+                            <span className="payment-icon">📱</span>
+                            <span className="payment-label">{t('checkout.other')}</span>
+                          </button>
+                        </div>
+                        <div className="payment-total">
+                          <span>{t('checkout.totalAmount')}:</span>
+                          <span className="amount">{formatCurrency(total, settings.currency)}</span>
+                        </div>
+                        
+                        <div className="debt-section" style={{ marginTop: '20px', padding: '15px', background: 'var(--card-bg)', borderRadius: '8px' }}>
+                          <div className="debt-input-group" style={{ marginBottom: '15px' }}>
+                            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: 'var(--text-color)' }}>
+                              {t('checkout.paidAmount')} (optional):
+                            </label>
+                            <input
+                              type="text"
+                              className="debt-input"
+                              style={{ width: '100%', padding: '10px', fontSize: '16px', borderRadius: '6px', border: '2px solid var(--border-color)', background: 'var(--input-bg)', color: 'var(--text-color)' }}
+                              value={paidAmount}
+                              onChange={(e) => {
+                                const str = e.target.value;
+                                // allow empty string (optional field)
+                                setPaidAmount(str);
+                                const paid = parseFloat(str) || 0;
+                                setDebtAmount(Math.max(0, (total || 0) - paid));
+                              }}
+                              inputMode="decimal"
+                              placeholder={String(total || 0)}
+                            />
+          
+                            <div style={{ marginTop: '8px' }}>
+                              <label style={{ display: 'block', marginBottom: '6px' }}>{t('SalesByInvoices.clientNameOptional')}</label>
+                              <input name="clientName" type="text" value={formData.clientName} onChange={handleInputChange} placeholder={t('SalesByInvoices.clientNameOptional')} style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border-color)' }} />
+                            </div>
+                          </div>
+                          
+                          <div className="debt-display" style={{ padding: '10px', background: debtAmount > 0 ? '#ff6b6b20' : '#51cf6620', borderRadius: '6px', textAlign: 'center' }}>
+                            <span style={{ fontSize: '14px', opacity: 0.8 }}>{t('checkout.remainingDebt')}:</span>
+                            <span style={{ fontSize: '20px', fontWeight: 'bold', marginLeft: '10px', color: debtAmount > 0 ? '#ff6b6b' : '#51cf66' }}>
+                              {formatCurrency(debtAmount, settings.currency)}
+                            </span>
+                          </div>
+                        </div>
+                        
+                        <div className="payment-keyboard-hints">
+                          <div className="hint-item">
+                            <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <span>{t('checkout.shortcutNavigate')}</span>
+                          </div>
+                          <div className="hint-item">
+                            <kbd>Enter</kbd> <span>{t('checkout.shortcutConfirm')}</span>
+                          </div>
+                          <div className="hint-item">
+                            <kbd>ESC</kbd> <span>{t('checkout.shortcutCancel')}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="modal-footer">
+                        <button className="cancel-btn" onClick={() => setShowPaymentModal(false)}>
+                          {t('checkout.shortcutCancel')} <kbd className="kbd-hint">ESC</kbd>
+                        </button>
+                        <button className="confirm-btn" onClick={processPayment}>
+                          {t('checkout.confirmPayment')} <kbd className="kbd-hint">Enter</kbd>
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="payment-total">
-                    <span>{t('SalesByInvoices.totalAmount')}:</span>
-                    <span className="amount">{formatCurrency(total, settings.currency)}</span>
-                  </div>
-                  
-                  <div className="debt-section" style={{ marginTop: '20px', padding: '15px', background: 'var(--card-bg)', borderRadius: '8px' }}>
-                    <div className="debt-input-group" style={{ marginBottom: '15px' }}>
-                      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: 'var(--text-color)' }}>
-                        {t('checkout.paidAmount')}:
-                      </label>
-                      <input
-                        type="number"
-                        className="debt-input"
-                        style={{ width: '100%', padding: '10px', fontSize: '16px', borderRadius: '6px', border: '2px solid var(--border-color)', background: 'var(--input-bg)', color: 'var(--text-color)' }}
-                        value={paidAmount || 0}
-                        onChange={(e) => {
-                          const paid = parseFloat(e.target.value) || 0;
-                          setPaidAmount(paid);
-                          setDebtAmount(Math.max(0, (total || 0) - paid));
-                        }}
-                        step="0.01"
-                        min="0"
-                        max={total || 0}
-                      />
-                    </div>
-                    
-                    <div className="debt-display" style={{ padding: '10px', background: debtAmount > 0 ? '#ff6b6b20' : '#51cf6620', borderRadius: '6px', textAlign: 'center' }}>
-                      <span style={{ fontSize: '14px', opacity: 0.8 }}>{t('checkout.remainingDebt')}:</span>
-                      <span style={{ fontSize: '20px', fontWeight: 'bold', marginLeft: '10px', color: debtAmount > 0 ? '#ff6b6b' : '#51cf66' }}>
-                        {formatCurrency(debtAmount, settings.currency)}
-                      </span>
-                    </div>
-                  </div>
-                  
-                  <div className="payment-keyboard-hints">
-                    <div className="hint-item">
-                      <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <span>{t('SalesByInvoices.shortcutNavigate')}</span>
-                    </div>
-                    <div className="hint-item">
-                      <kbd>Enter</kbd> <span>{t('SalesByInvoices.shortcutConfirm')}</span>
-                    </div>
-                    <div className="hint-item">
-                      <kbd>ESC</kbd> <span>{t('SalesByInvoices.shortcutCancel')}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="modal-footer">
-                  <button className="cancel-btn" onClick={() => setShowPaymentModal(false)}>
-                    {t('common.close')} <kbd className="kbd-hint">ESC</kbd>
-                  </button>
-                  <button className="confirm-btn" onClick={processPayment}>
-                    {t('SalesByInvoices.confirmPayment')} <kbd className="kbd-hint">Enter</kbd>
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+                )}
 
           {/* Manual Montant Modal */}
           {showManualItemModal && (
@@ -2164,8 +2328,33 @@ const SalesByInvoices = () => {
                 </div>
                 <form className="manual-item-form" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleManualItemSubmit(); } }} onSubmit={handleManualItemSubmit}>
                   <div className="form-group">
-                    <label>{t('SalesByInvoices.manualItemName') || 'Item name (optional)'}</label>
-                    <input value={manualItemData.name} onChange={e => setManualItemData({ ...manualItemData, name: e.target.value })} placeholder={t('SalesByInvoices.manualItemNamePlaceholder') || 'e.g., Service, Tip'} />
+                    <label>{t('SalesByInvoices.searchProduct') || 'Search product (name or reference)'}</label>
+                    <input
+                      value={manualProductQuery}
+                      onChange={e => setManualProductQuery(e.target.value)}
+                      placeholder={t('SalesByInvoices.searchProductPlaceholder') || 'Type name or reference'}
+                      style={{ width: '100%', padding: '8px 10px', marginTop: 6 }}
+                    />
+                    {manualProductQuery.trim().length > 0 && (
+                      <div className="product-search-results" style={{ marginTop: 6, maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border-color, #eee)', borderRadius: 6, background: 'var(--card-bg, #fff)' }}>
+                        {manualProductResults.length === 0 ? (
+                          <div style={{ padding: 8, fontSize: 12, color: '#666' }}>{t('SalesByInvoices.noProductsFound') || 'No products found'}</div>
+                        ) : (
+                          manualProductResults.map(p => (
+                            <div key={p.id} className="product-result" onClick={() => selectManualProduct(p)} style={{ padding: 8, borderBottom: '1px solid #fafafa', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>{p.reference || p.barcode || ''}</div>
+                              </div>
+                              <div style={{ fontSize: 13, color: '#333', fontWeight: 600 }}>{formatCurrency(p.price || p.detailPrice || 0, settings.currency)}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    <label style={{ marginTop: 8 }}>{t('SalesByInvoices.manualItemName') || 'Item name (optional)'}</label>
+                    <input value={manualItemData.name} onChange={e => setManualItemData({ ...manualItemData, name: e.target.value, _linkedProductId: manualItemData._linkedProductId })} placeholder={t('SalesByInvoices.manualItemNamePlaceholder') || 'e.g., Service, Tip'} />
                   </div>
                   <div className="form-group">
                     <label>{t('SalesByInvoices.amount') || 'Amount'}</label>
@@ -2181,8 +2370,15 @@ const SalesByInvoices = () => {
                       <option value="unit">{t('products.unit', 'Unit')}</option>
                       <option value="g">g</option>
                       <option value="kg">kg</option>
+                      <option value="tonne">tonne</option>
+                      <option value="mg">mg</option>
                       <option value="l">l</option>
+                      <option value="ml">ml</option>
+                      <option value="m">m</option>
+                      <option value="cm">cm</option>
+                      <option value="mm">mm</option>
                       <option value="box">{t('products.box', 'Box')}</option>
+                      <option value="pack">{t('products.pack', 'Pack')}</option>
                     </select>
                   </div>
                   <div className="form-actions">
@@ -2305,6 +2501,12 @@ const SalesByInvoices = () => {
                     <span>{t('checkout.total') || 'Total'}:</span>
                     <span>{formatCurrency(receiptData.total, settings.currency)}</span>
                   </div>
+                  {Number(receiptData.debt) > 0 && (
+                    <div className="receipt-row">
+                      <span>{t('checkout.remainingDebt') || 'Remaining Debt'}:</span>
+                      <span style={{ color: '#d6336c', fontWeight: '700' }}>{formatCurrency(Number(receiptData.debt), settings.currency)}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Payment Method */}

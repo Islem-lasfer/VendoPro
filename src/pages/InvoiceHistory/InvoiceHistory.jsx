@@ -1,6 +1,6 @@
 // Add styles for client info block (theme compatible)
 import './InvoiceHistory.css';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSettings } from '../../context/SettingsContext';
 import { formatCurrency } from '../../utils/currency';
@@ -10,8 +10,27 @@ import ConfirmDialog from '../../components/Notification/ConfirmDialog';
 import './InvoiceHistory.css';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import JsBarcode from 'jsbarcode';
-import { loadPdfFonts, setPdfFont, getAutoTableStyles } from '../../utils/pdfFonts';
+import { generateBarcodeDataUrl } from '../../utils/barcode';
+import { renderDocHeader, renderInvoiceTemplate } from '../../utils/pdfTemplates/invoiceTemplate';
+
+// Conditionally import ipcRenderer for Electron environment
+let ipcRenderer = null;
+try {
+  const electron = window.require ? window.require('electron') : null;
+  ipcRenderer = electron ? electron.ipcRenderer : null;
+} catch (error) {
+  console.warn('ipcRenderer not available:', error.message);
+}
+
+// Lazy-load pdf font utilities to enable dynamic chunking and reduce main bundle size
+let pdfFontsModulePromise = null;
+const getPdfFontsModule = () => {
+  if (!pdfFontsModulePromise) pdfFontsModulePromise = import('../../utils/pdfFonts');
+  return pdfFontsModulePromise;
+};
+// Safe synchronous fallbacks until the module is loaded
+let setPdfFont = (doc, style = 'normal') => { try { doc.setFont(style === 'bold' ? 'helvetica' : 'helvetica'); } catch (e) {} };
+let getAutoTableStyles = () => ({ font: 'helvetica' });
 import { Bar, Pie, Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -39,7 +58,8 @@ ChartJS.register(
 );
 
     const InvoiceHistory = () => {
-      const { t } = useTranslation();
+      const { t, i18n } = useTranslation();
+      const isRTL = i18n && ['ar','he','fa','ur'].includes(i18n.language);
       const { settings } = useSettings();
       
       // Document type filter options using translations
@@ -72,23 +92,62 @@ ChartJS.register(
               const [loading, setLoading] = useState(false);
               const [editingDebt, setEditingDebt] = useState(null); // { invoiceId, debt, paid }
 
+              // Lazy-rendering / infinite scroll for invoice list
+              const INITIAL_VISIBLE = 100;
+              const BATCH_SIZE = 100;
+              const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
+              const listRef = useRef(null);
+
               // Helper function for notifications
               const showNotification = (message, type = 'info') => {
                 setNotification({ message, type });
               };
 
-              // Fetch invoices on mount
-              useEffect(() => {
-                getAllInvoices().then(data => {
-                  if (Array.isArray(data)) {
-                    setInvoices(data);
-                  } else if (data && Array.isArray(data.data)) {
-                    setInvoices(data.data);
-                  } else {
-                    setInvoices([]);
-                  }
-                });
-              }, []);
+  // Load invoices from DB (used on mount and after saves)
+  const loadInvoices = async () => {
+    try {
+      const data = await getAllInvoices();
+      console.log('DEBUG: loadInvoices() ->', data);
+      if (Array.isArray(data)) setInvoices(data);
+      else if (data && Array.isArray(data.data)) setInvoices(data.data);
+      else setInvoices([]);
+    } catch (err) {
+      console.error('DEBUG: loadInvoices error', err);
+      setInvoices([]);
+    }
+  };
+
+  // Initial load
+  useEffect(() => { loadInvoices(); }, []);
+
+  // React to invoices saved elsewhere (SalesByInvoices) — reload and optionally select
+  useEffect(() => {
+    const onInvoiceSaved = async (ev) => {
+      try {
+        const detail = ev && ev.detail ? ev.detail : null;
+        const data = await getAllInvoices();
+        console.log('DEBUG: onInvoiceSaved -> detail=', detail, 'db=', data);
+        if (Array.isArray(data)) setInvoices(data);
+        else if (data && Array.isArray(data.data)) setInvoices(data.data);
+        else setInvoices([]);
+
+        if (detail) {
+          const id = detail.id || detail.invoiceNumber || null;
+          if (id) {
+            const list = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+            const found = list.find(inv => String(inv.id) === String(detail.id) || inv.invoiceNumber === detail.invoiceNumber || String(inv.invoiceNumber) === String(detail.invoiceNumber));
+            if (found) setSelectedInvoice(found);
+          }
+        }
+      } catch (e) {
+        console.error('invoice-saved handler error', e);
+      }
+    };
+
+    window.addEventListener('invoice-saved', onInvoiceSaved);
+    return () => window.removeEventListener('invoice-saved', onInvoiceSaved);
+  }, []);
+
 
               // Filtered invoices (search, type, date)
               // State for all filters and UI
@@ -141,6 +200,26 @@ ChartJS.register(
                   return true;
                 });
               }, [invoices, docTypeFilter, debtFilter, searchTerm, filterDate, startDate, endDate]);
+
+  // Reset visibleCount when filtered list changes so we always show the first page
+  React.useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE);
+    // If the list container exists, scroll to top so user sees newest items
+    try { if (listRef?.current) listRef.current.scrollTop = 0; } catch(e){}
+  }, [/* reset when filters/search change */ invoices, docTypeFilter, debtFilter, searchTerm, filterDate, startDate, endDate]);
+
+  // Displayed slice used by the rendered list
+  const displayedInvoices = React.useMemo(() => filteredInvoices.slice(0, visibleCount), [filteredInvoices, visibleCount]);
+
+  // Scroll handler: when near bottom, increase visibleCount
+  const handleListScroll = (e) => {
+    const el = e.target;
+    if (!el) return;
+    const threshold = 160; // px from bottom
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - threshold) {
+      setVisibleCount(prev => Math.min(prev + BATCH_SIZE, filteredInvoices.length));
+    }
+  };
 
       const handleDebtUpdate = async (invoiceId, newPaid) => {
         try {
@@ -205,31 +284,41 @@ ChartJS.register(
         const docType = invoice.type;
         const doc = new jsPDF();
         
-        // Load Unicode fonts for multi-language support
-        await loadPdfFonts(doc);
+        // Load Unicode fonts for multi-language support (dynamically import the font utilities)
+        const pdfFontsModule = await getPdfFontsModule();
+        if (pdfFontsModule && pdfFontsModule.loadPdfFonts) {
+          await pdfFontsModule.loadPdfFonts(doc, i18n.language);
+          // Replace local helpers with real implementations for synchronous use later
+          setPdfFont = pdfFontsModule.setPdfFont || setPdfFont;
+          // Wrap getAutoTableStyles so it defaults to the current document direction (isRTL)
+          getAutoTableStyles = (rtl = isRTL) => (pdfFontsModule.getAutoTableStyles ? pdfFontsModule.getAutoTableStyles(rtl) : { font: 'helvetica', halign: rtl ? 'right' : 'left' });
+        } else {
+          setPdfFont(doc, 'normal');
+        }
         // Ensure font is set for all text
         setPdfFont(doc, 'normal');
-        
-        doc.setFillColor(...beige);
-        doc.rect(0, 0, 210, 38, 'F');
-        let logo = settings.posLogo || invoice.companyLogo || invoice.logo;
-        if (logo) {
-          try {
-            let width = 22;
-            let height = 22;
-            if (logo.startsWith('data:image')) {
-              const img = document.createElement('img');
-              img.src = logo;
-              if (img.complete && img.naturalWidth && img.naturalHeight) {
-                width = height * (img.naturalWidth / img.naturalHeight);
-              }
-            }
-            doc.addImage(logo, 'PNG', 10, 7, width, height, undefined, 'FAST');
-          } catch (e) {}
+
+        // Mirror drawing/text coordinates and default alignment when RTL
+        const _pageWidth = doc.internal.pageSize.getWidth();
+        if (isRTL) {
+          const _origText = doc.text.bind(doc);
+          doc.text = function(text, x, y, options) {
+            const opts = options || {};
+            if (opts.align === 'center' || typeof x !== 'number') return _origText(text, x, y, opts);
+            const mx = _pageWidth - x;
+            if (opts.align === 'left') opts.align = 'right';
+            else if (opts.align === 'right') opts.align = 'left';
+            else if (!opts.align) opts.align = 'right';
+            return _origText(text, mx, y, opts);
+          };
+          const _origRect = doc.rect.bind(doc);
+          doc.rect = function(x, y, w, h, style) {
+            if (typeof x === 'number' && x !== 0) return _origRect(_pageWidth - x - w, y, w, h, style);
+            return _origRect(x, y, w, h, style);
+          };
         }
-        doc.setFontSize(10);
-        doc.setTextColor(...noir);
-        // Format date as DD-MM-YYYY
+        
+        // Standardized header
         const formatDate = (dateStr) => {
           if (!dateStr) return '';
           if (dateStr.includes('-')) {
@@ -246,20 +335,16 @@ ChartJS.register(
         else if (docType === 'proforma') title = t('SalesByInvoices.proforma');
         else if (docType === 'garantie') title = t('SalesByInvoices.garantie');
         else title = t('SalesByInvoices.document');
-        let titleFontSize = 28;
-        const maxTitleWidth = 80;
-        doc.setFontSize(titleFontSize);
-        setPdfFont(doc, 'bold');
-        let titleWidth = doc.getTextWidth(title.toUpperCase());
-        while (titleWidth > maxTitleWidth && titleFontSize > 12) {
-          titleFontSize -= 2;
-          doc.setFontSize(titleFontSize);
-          titleWidth = doc.getTextWidth(title.toUpperCase());
-        }
-        doc.text(title.toUpperCase(), 120, 20, { align: 'left' });
-        doc.setFontSize(9);
-        setPdfFont(doc, 'normal');
-        doc.text(`${t('SalesByInvoices.documentNo')}: ${invoice.invoiceNumber || invoice.number || ''}`, 120, 28, { align: 'left' });
+
+        renderDocHeader(doc, {
+          title,
+          docNumber: invoice.invoiceNumber || invoice.number || '',
+          date: formatDate(invoice.date),
+          company: invoice,
+          logo: settings.posLogo || invoice.companyLogo || invoice.logo,
+          isRTL,
+          t
+        });
 
         // Info: shop and client in bold with text wrapping
         doc.setFontSize(11);
@@ -296,6 +381,12 @@ ChartJS.register(
           doc.text(`${t('SalesByInvoices.taxId')}: ${invoice.companyTaxId || settings.taxId}`, 10, yPos);
           yPos += 6;
         }
+        const _companyRC = invoice.companyRC || (settings && settings.rc) || '';
+        const _companyAI = invoice.companyAI || (settings && settings.ai) || '';
+        const _companyNIS = invoice.companyNIS || (settings && settings.nis) || '';
+        if (_companyRC) { doc.text(`${t('settings.rcShort') || 'RC'}: ${_companyRC}`, 10, yPos); yPos += 6; }
+        if (_companyAI) { doc.text(`${t('settings.aiShort') || 'AI'}: ${_companyAI}`, 10, yPos); yPos += 6; }
+        if (_companyNIS) { doc.text(`${t('settings.nisShort') || 'NIS'}: ${_companyNIS}`, 10, yPos); yPos += 6; }
         if (invoice.paymentTerms) {
           const paymentTermsLines = doc.splitTextToSize(`${t('SalesByInvoices.paymentTerms')}: ${invoice.paymentTerms}`, 90);
           paymentTermsLines.forEach(line => {
@@ -333,6 +424,10 @@ ChartJS.register(
           doc.text(`${t('SalesByInvoices.phone')}: ${invoice.clientPhone}`, 120, clientYPos);
           clientYPos += 6;
         }
+        // client identifiers (show invoice-stored values if present)
+        if (invoice.clientRC) { doc.text(`${t('settings.rcShort') || 'RC'}: ${invoice.clientRC}`, 120, clientYPos); clientYPos += 6; }
+        if (invoice.clientAI) { doc.text(`${t('settings.aiShort') || 'AI'}: ${invoice.clientAI}`, 120, clientYPos); clientYPos += 6; }
+        if (invoice.clientNIS) { doc.text(`${t('settings.nisShort') || 'NIS'}: ${invoice.clientNIS}`, 120, clientYPos); clientYPos += 6; }
         setPdfFont(doc, 'normal');
 
         // Calculate dynamic start position for table (after all text)
@@ -346,69 +441,43 @@ ChartJS.register(
         const tax = invoice.tax || 0;
         const total = invoice.total || 0;
         if (docType === 'devis') {
-          autoTable(doc, {
-            startY: tableStartY,
-            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-            body: items.map(item => [
-              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
-              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
-              `${item.price} ${currency}`,
-              `${(item.price * item.quantity).toFixed(2)} ${currency}`
-            ]),
-            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-            bodyStyles: { halign: 'center' },
-            columnStyles: {
-              0: { cellWidth: 80, halign: 'left' },
-              1: { cellWidth: 30 },
-              2: { cellWidth: 35 },
-              3: { cellWidth: 35 }
-            },
-            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+          renderInvoiceTemplate(doc, {
+            items,
+            company: invoice,
+            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
+            title,
+            docNumber: invoice.invoiceNumber || invoice.number || '',
+            date: formatDate(invoice.date),
+            totals: { subtotal, discount, tax, total },
+            currency,
+            t,
+            isRTL,
+            showPrices: true
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.setFontSize(10);
-          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
-          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
-          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
-          setPdfFont(doc, 'bold');
-          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
-          setPdfFont(doc, 'normal');
-          doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(invoice.date)}`, 15, finalY + 32);
-          doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 40);
-          doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 48);
+          doc.text(`${t('SalesByInvoices.validityDate')} : ${formatDate(invoice.date)}`, 15, finalY + 8);
+          doc.text(t('SalesByInvoices.termsAndConditions') + ':', 15, finalY + 16);
+          doc.text(t('SalesByInvoices.quotationNote'), 15, finalY + 24);
         } else if (docType === 'bon_commande') {
-          autoTable(doc, {
-            startY: tableStartY,
-            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-            body: items.map(item => [
-              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
-              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
-              `${item.price} ${currency}`,
-              `${(item.price * item.quantity).toFixed(2)} ${currency}`
-            ]),
-            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-            bodyStyles: { halign: 'center' },
-            columnStyles: {
-              0: { cellWidth: 80, halign: 'left' },
-              1: { cellWidth: 30 },
-              2: { cellWidth: 35 },
-              3: { cellWidth: 35 }
-            },
-            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+          renderInvoiceTemplate(doc, {
+            items,
+            company: invoice,
+            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
+            title,
+            docNumber: invoice.invoiceNumber || invoice.number || '',
+            date: formatDate(invoice.date),
+            totals: { subtotal, discount, tax, total },
+            currency,
+            t,
+            isRTL,
+            showPrices: true
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.setFontSize(10);
-          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
-          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
-          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
-          setPdfFont(doc, 'bold');
-          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
-          setPdfFont(doc, 'normal');
-          if (invoice.linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + invoice.linkedQuotation, 15, finalY + 32);
-          doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(invoice.date)}`, 15, finalY + 40);
-          doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 48);
-          doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 56);
-          doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 64);
+          if (invoice.linkedQuotation) doc.text(t('SalesByInvoices.linkedQuotation') + ': ' + invoice.linkedQuotation, 15, finalY + 8);
+          doc.text(`${t('SalesByInvoices.orderDate')} : ${formatDate(invoice.date)}`, 15, finalY + 16);
+          doc.text(`${t('SalesByInvoices.customerConfirmationStatus')} : ${t('SalesByInvoices.pending')}`, 15, finalY + 24);
+          doc.text(t('SalesByInvoices.deliveryTerms') + ':', 15, finalY + 32);
+          doc.text(t('SalesByInvoices.purchaseOrderNote'), 15, finalY + 40);
         } else if (docType === 'bon_livraison') {
           autoTable(doc, {
             startY: tableStartY,
@@ -420,7 +489,7 @@ ChartJS.register(
             headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
             bodyStyles: { halign: 'center' },
             columnStyles: {
-              0: { cellWidth: 130, halign: 'left' },
+              0: { cellWidth: 130, halign: isRTL ? 'right' : 'left' },
               1: { cellWidth: 40 }
             },
             styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
@@ -433,68 +502,39 @@ ChartJS.register(
           doc.rect(15, finalY + 28, 60, 25);
           doc.text(t('SalesByInvoices.deliveryNoteInfo'), 15, finalY + 60);
         } else if (docType === 'facture') {
-          autoTable(doc, {
-            startY: tableStartY,
-            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-            body: items.map(item => [
-              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
-              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
-              `${item.price} ${currency}`,
-              `${(item.price * item.quantity).toFixed(2)} ${currency}`
-            ]),
-            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-            bodyStyles: { halign: 'center' },
-            columnStyles: {
-              0: { cellWidth: 80, halign: 'left' },
-              1: { cellWidth: 30 },
-              2: { cellWidth: 35 },
-              3: { cellWidth: 35 }
-            },
-            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+          renderInvoiceTemplate(doc, {
+            items,
+            company: invoice,
+            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
+            title,
+            docNumber: invoice.invoiceNumber || invoice.number || '',
+            date: formatDate(invoice.date),
+            totals: { subtotal, discount, tax, total },
+            currency,
+            t,
+            isRTL,
+            showPrices: true,
+            paymentInfo: { paymentMethod: invoice.paymentMethod, dueDate: formatDate(invoice.date), paymentStatus: (settings.paymentStatusOptions && settings.paymentStatusOptions.find(opt => opt.value === invoice.paymentStatus)?.label) || invoice.paymentStatus }
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.setFontSize(10);
-          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
-          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
-          doc.text(`${t('invoiceHistory.tax')} (${settings.taxRate || 0}%) : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
-          setPdfFont(doc, 'bold');
-          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
-          setPdfFont(doc, 'normal');
-          if (invoice.linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + invoice.linkedDelivery, 15, finalY + 32);
-          doc.text(`${t('SalesByInvoices.paymentMethod')} : ${invoice.paymentMethod || ''}`, 15, finalY + 40);
-          doc.text(`${t('SalesByInvoices.dueDate')} : ${formatDate(invoice.date)}`, 15, finalY + 48);
-          let statusLabel = (settings.paymentStatusOptions && settings.paymentStatusOptions.find(opt => opt.value === invoice.paymentStatus)?.label) || invoice.paymentStatus;
-          doc.text(`${t('SalesByInvoices.paymentStatus')} : ${statusLabel}`, 15, finalY + 56);
-          doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 64);
+          if (invoice.linkedDelivery) doc.text(t('SalesByInvoices.linkedDeliveryNote') + ': ' + invoice.linkedDelivery, 15, finalY + 8);
+          doc.text(t('SalesByInvoices.legalInfo'), 15, finalY + 16);
         } else if (docType === 'proforma') {
-          autoTable(doc, {
-            startY: tableStartY,
-            head: [[t('SalesByInvoices.description'), t('SalesByInvoices.quantity'), t('SalesByInvoices.price'), t('SalesByInvoices.total')]],
-            body: items.map(item => [
-              (item.productName && typeof item.productName === 'string' && item.productName.trim() !== '') ? item.productName : (item.name || '-'),
-              `${item.quantity}${item.quantityType && item.quantityType !== 'unit' ? ' ' + item.quantityType : ''}`,
-              `${item.price} ${currency}`,
-              `${(item.price * item.quantity).toFixed(2)} ${currency}`
-            ]),
-            headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
-            bodyStyles: { halign: 'center' },
-            columnStyles: {
-              0: { cellWidth: 80, halign: 'left' },
-              1: { cellWidth: 30 },
-              2: { cellWidth: 35 },
-              3: { cellWidth: 35 }
-            },
-            styles: { fontSize: 10, overflow: 'linebreak', cellPadding: 2, ...getAutoTableStyles() }
+          renderInvoiceTemplate(doc, {
+            items,
+            company: invoice,
+            client: { name: invoice.customerName || invoice.clientName || '', address: invoice.clientAddress || '' },
+            title,
+            docNumber: invoice.invoiceNumber || invoice.number || '',
+            date: formatDate(invoice.date),
+            totals: { subtotal, discount, tax, total },
+            currency,
+            t,
+            isRTL,
+            showPrices: true
           });
           const finalY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 100;
-          doc.setFontSize(10);
-          doc.text(`${t('SalesByInvoices.subtotal')} : ${subtotal.toFixed(2)} ${currency}`, 140, finalY);
-          doc.text(`${t('SalesByInvoices.discount')} : ${discount.toFixed(2)} ${currency}`, 140, finalY + 8);
-          doc.text(`${t('invoiceHistory.tax')} : ${tax.toFixed(2)} ${currency}`, 140, finalY + 16);
-          setPdfFont(doc, 'bold');
-          doc.text(`${t('SalesByInvoices.total')} : ${total.toFixed(2)} ${currency}`, 140, finalY + 24);
-          setPdfFont(doc, 'normal');
-          doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 42);
+          doc.text(t('SalesByInvoices.proformainfo'), 15, finalY + 8);
         } else if (docType === 'garantie') {
           doc.setFontSize(12);
           doc.text(t('SalesByInvoices.productInformation'), 15, tableStartY);
@@ -545,7 +585,15 @@ ChartJS.register(
           doc.text(t('SalesByInvoices.clientSignature') + ' :', 130, garantieYPos - 5);
           doc.rect(130, garantieYPos, 60, 25);
           doc.setFontSize(9);
-          doc.text((invoice.companyName || 'POS') + ' – ' + t('SalesByInvoices.thankYou'), 60, 285);
+          // ensure thank-you sits above barcode to prevent overlap
+          const _pageHeight = doc.internal.pageSize.getHeight();
+          const _barcodeH = 12; // mm
+          const _marginBottom = 14; // mm
+          const _barcodeTopY = _pageHeight - _marginBottom - _barcodeH;
+          const _defaultThankYouY = 285;
+          const thankYouY = Math.min(_defaultThankYouY, _barcodeTopY - 6);
+          const _pageWidthCenter = doc.internal.pageSize.getWidth();
+          doc.text((invoice.companyName || 'POS') + ' – ' + t('SalesByInvoices.thankYou'), _pageWidthCenter / 2, thankYouY, { align: 'center' });
         } else {
           autoTable(doc, {
             startY: tableStartY,
@@ -554,7 +602,7 @@ ChartJS.register(
             headStyles: { fillColor: noir, textColor: 255, halign: 'center' },
             bodyStyles: { halign: 'center' },
             columnStyles: {
-              0: { cellWidth: 80, halign: 'left' },
+              0: { cellWidth: 80, halign: isRTL ? 'right' : 'left' },
               1: { cellWidth: 35 },
               2: { cellWidth: 30 },
               3: { cellWidth: 35 }
@@ -617,14 +665,7 @@ ChartJS.register(
     });
   };
 
-  const loadInvoices = async () => {
-    setLoading(true);
-    const result = await getAllInvoices();
-    if (result.success) {
-      setInvoices(result.data);
-    }
-    setLoading(false);
-  };
+
 
   const deleteInvoice = (id) => {
     setConfirmDialog({
@@ -675,6 +716,13 @@ ChartJS.register(
   // ...existing code...
 
   // Modals will be rendered inside the return statement below
+
+  // Compute receipt preview totals with fallbacks to avoid inline complex expressions in JSX
+  const rp = receiptPreviewData || {};
+  const rpSubtotal = rp.subtotal ?? (rp.items ? rp.items.reduce((s, i) => s + (parseFloat(i.price || 0) * parseFloat(i.quantity || 0)), 0) : 0);
+  const rpDiscount = rp.discount ?? (rpSubtotal * (settings.discountRate / 100));
+  const rpTax = rp.tax ?? ((rpSubtotal - rpDiscount) * (settings.taxRate / 100));
+  const rpTotal = rp.total ?? (rpSubtotal - rpDiscount + rpTax);
 
   return (
     <div className="invoice-history-page">
@@ -729,20 +777,26 @@ ChartJS.register(
                 <div className="receipt-totals">
                   <div className="receipt-row">
                     <span>{t('checkout.subtotal') || 'Subtotal'}:</span>
-                    <span>{formatCurrency(receiptPreviewData.subtotal, settings.currency)}</span>
+                    <span>{formatCurrency(rpSubtotal, settings.currency)}</span>
                   </div>
                   <div className="receipt-row">
                     <span>{t('checkout.discount') || 'Discount'} ({settings.discountRate}%):</span>
-                    <span>-{formatCurrency(receiptPreviewData.discount, settings.currency)}</span>
+                    <span>-{formatCurrency(rpDiscount, settings.currency)}</span>
                   </div>
                   <div className="receipt-row">
                     <span>{t('checkout.tax') || 'Tax'} ({settings.taxRate}%):</span>
-                    <span>{formatCurrency(receiptPreviewData.tax, settings.currency)}</span>
+                    <span>{formatCurrency(rpTax, settings.currency)}</span>
                   </div>
                   <div className="receipt-row total">
                     <span>{t('checkout.total') || 'Total'}:</span>
-                    <span>{formatCurrency(receiptPreviewData.total, settings.currency)}</span>
+                    <span>{formatCurrency(rpTotal, settings.currency)}</span>
                   </div>
+                  {Number(rp.debt) > 0 && (
+                    <div className="receipt-row">
+                      <span>{t('checkout.remainingDebt') || 'Remaining Debt'}:</span>
+                      <span style={{ color: '#d6336c', fontWeight: '700' }}>{formatCurrency(Number(rp.debt), settings.currency)}</span>
+                    </div>
+                  )}
                 </div>
                 {/* Payment Method */}
                 <div className="receipt-payment">
@@ -764,6 +818,33 @@ ChartJS.register(
             <div className="receipt-preview-actions">
               <button className="cancel-btn" onClick={() => setShowReceiptPreview(false)}>
                 {t('common.close') || 'Close'}
+              </button>
+              <button className="confirm-btn" onClick={() => {
+                if (ipcRenderer && receiptPreviewData) {
+                  const payload = {
+                    items: receiptPreviewData.items,
+                    subtotal: receiptPreviewData.subtotal,
+                    tax: receiptPreviewData.tax,
+                    discount: receiptPreviewData.discount,
+                    total: receiptPreviewData.total,
+                    date: receiptPreviewData.date,
+                    debt: receiptPreviewData.debt || 0,
+                    paid: receiptPreviewData.paid || 0,
+                    paymentStatus: receiptPreviewData.paymentStatus || (receiptPreviewData.debt && receiptPreviewData.debt > 0 ? 'partial' : 'paid'),
+                    printerName: settings.receiptPrinter || undefined,
+                    showDialog: !!settings.printDialogOnPrint
+                  };
+
+                  ipcRenderer.once('print-result', (ev, result) => {
+                    if (result && result.success) showNotification(t('checkout.receiptPrinted') || 'Receipt printed!', 'success');
+                    else showNotification((result && result.error) || t('checkout.printFailed') || 'Print failed', 'error');
+                  });
+
+                  ipcRenderer.send('print-receipt', payload);
+                }
+                setShowReceiptPreview(false);
+              }}>
+                🖨️ {t('checkout.printReceipt') || 'Print Receipt'}
               </button>
             </div>
           </div>
@@ -959,13 +1040,13 @@ ChartJS.register(
 
       <div className="invoice-content">
         {/* Invoice List */}
-        <div className="invoice-list">
+        <div className="invoice-list" ref={listRef} onScroll={handleListScroll}>
           {filteredInvoices.length === 0 ? (
             <div className="empty-state">
               <p>📄 {t('invoiceHistory.noInvoices')}</p>
             </div>
           ) : (
-            filteredInvoices.map((invoice) => {
+            displayedInvoices.map((invoice) => {
               const debt = invoice.debt || 0;
               const paid = invoice.paid || 0;
               return (
@@ -982,6 +1063,9 @@ ChartJS.register(
                   <span className="invoice-date">📅 {formatDate(invoice.date)}</span>
                   <span className="invoice-time">🕐 {formatTime(invoice.date)}</span>
                   <span className="invoice-items">📦 {(invoice.items ? invoice.items.length : 0)} {t('invoiceHistory.items')}</span>
+                  { (invoice.customerName || invoice.clientName) && (
+                    <span className="invoice-customer">👤 {invoice.customerName || invoice.clientName}</span>
+                  ) }
                 </div>
                 {/* Show debt info for tickets */}
                 {invoice.type === 'ticket' && debt > 0 && (
@@ -1000,6 +1084,15 @@ ChartJS.register(
               </div>
               );
             })
+          )}
+
+          {/* Load indicator / counts */}
+          {filteredInvoices.length > 0 && (
+            <div className="load-more-indicator">
+              {displayedInvoices.length < filteredInvoices.length
+                ? `${t('invoiceHistory.showing') || 'Showing'} ${displayedInvoices.length} / ${filteredInvoices.length}...`
+                : `${t('invoiceHistory.showingAll') || 'Showing all'} ${filteredInvoices.length}`}
+            </div>
           )}
         </div>
 
@@ -1246,8 +1339,14 @@ ChartJS.register(
                           {renderField(t('SalesByInvoices.clientAddress'), selectedInvoice.clientAddress)}
                           {renderField(t('SalesByInvoices.clientEmail'), selectedInvoice.clientEmail)}
                           {renderField(t('SalesByInvoices.clientPhone'), selectedInvoice.clientPhone)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.clientRC)}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.clientAI)}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.clientNIS)}
                           {renderField(t('SalesByInvoices.date'), selectedInvoice.date && formatDate(selectedInvoice.date))}
                           {renderField(t('SalesByInvoices.taxId'), selectedInvoice.companyTaxId)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.companyRC || (settings && settings.rc))}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.companyAI || (settings && settings.ai))}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.companyNIS || (settings && settings.nis))}
                           {renderField(t('SalesByInvoices.paymentTerms'), selectedInvoice.paymentTerms)}
                           {renderField(t('SalesByInvoices.paymentStatus'), selectedInvoice.paymentStatus ? t('SalesByInvoices.' + selectedInvoice.paymentStatus) : '')}
                         </div>
@@ -1271,8 +1370,14 @@ ChartJS.register(
                           {renderField(t('SalesByInvoices.clientAddress'), selectedInvoice.clientAddress)}
                           {renderField(t('SalesByInvoices.clientEmail'), selectedInvoice.clientEmail)}
                           {renderField(t('SalesByInvoices.clientPhone'), selectedInvoice.clientPhone)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.clientRC)}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.clientAI)}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.clientNIS)}
                           {renderField(t('SalesByInvoices.date'), selectedInvoice.date && formatDate(selectedInvoice.date))}
                           {renderField(t('SalesByInvoices.taxId'), selectedInvoice.companyTaxId)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.companyRC || (settings && settings.rc))}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.companyAI || (settings && settings.ai))}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.companyNIS || (settings && settings.nis))}
                           {renderField(t('SalesByInvoices.paymentTerms'), selectedInvoice.paymentTerms)}
                         </div>
                       </div>
@@ -1295,8 +1400,14 @@ ChartJS.register(
                           {renderField(t('SalesByInvoices.clientAddress'), selectedInvoice.clientAddress)}
                           {renderField(t('SalesByInvoices.clientEmail'), selectedInvoice.clientEmail)}
                           {renderField(t('SalesByInvoices.clientPhone'), selectedInvoice.clientPhone)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.clientRC)}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.clientAI)}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.clientNIS)}
                           {renderField(t('SalesByInvoices.date'), selectedInvoice.date && formatDate(selectedInvoice.date))}
                           {renderField(t('SalesByInvoices.taxId'), selectedInvoice.companyTaxId)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.companyRC || (settings && settings.rc))}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.companyAI || (settings && settings.ai))}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.companyNIS || (settings && settings.nis))}
                           {renderField(t('SalesByInvoices.paymentTerms'), selectedInvoice.paymentTerms)}
                         </div>
                       </div>
@@ -1319,8 +1430,14 @@ ChartJS.register(
                           {renderField(t('SalesByInvoices.clientAddress'), selectedInvoice.clientAddress)}
                           {renderField(t('SalesByInvoices.clientEmail'), selectedInvoice.clientEmail)}
                           {renderField(t('SalesByInvoices.clientPhone'), selectedInvoice.clientPhone)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.clientRC)}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.clientAI)}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.clientNIS)}
                           {renderField(t('SalesByInvoices.date'), selectedInvoice.date && formatDate(selectedInvoice.date))}
                           {renderField(t('SalesByInvoices.taxId'), selectedInvoice.companyTaxId)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.companyRC || (settings && settings.rc))}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.companyAI || (settings && settings.ai))}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.companyNIS || (settings && settings.nis))}
                           {renderField(t('SalesByInvoices.paymentTerms'), selectedInvoice.paymentTerms)}
                         </div>
                       </div>
@@ -1343,8 +1460,14 @@ ChartJS.register(
                           {renderField(t('SalesByInvoices.clientAddress'), selectedInvoice.clientAddress)}
                           {renderField(t('SalesByInvoices.clientEmail'), selectedInvoice.clientEmail)}
                           {renderField(t('SalesByInvoices.clientPhone'), selectedInvoice.clientPhone)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.clientRC)}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.clientAI)}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.clientNIS)}
                           {renderField(t('SalesByInvoices.date'), selectedInvoice.date && formatDate(selectedInvoice.date))}
                           {renderField(t('SalesByInvoices.taxId'), selectedInvoice.companyTaxId)}
+                          {renderField(t('SalesByInvoices.rc') || 'RC', selectedInvoice.companyRC || (settings && settings.rc))}
+                          {renderField(t('SalesByInvoices.ai') || 'AI', selectedInvoice.companyAI || (settings && settings.ai))}
+                          {renderField(t('SalesByInvoices.nis') || 'NIS', selectedInvoice.companyNIS || (settings && settings.nis))}
                           {renderField(t('SalesByInvoices.paymentTerms'), selectedInvoice.paymentTerms)}
                         </div>
                       </div>
